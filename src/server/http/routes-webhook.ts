@@ -5,6 +5,7 @@ import type { SqliteStore } from "../db/store.js";
 import { samePhone } from "../phone.js";
 import { safeEqual } from "../security.js";
 import type { ChatService } from "../services/chat-service.js";
+import type { SmsProvider } from "../sms/provider.js";
 import {
   androidGatewayWebhookSchema,
   verifyAndroidGatewaySignature,
@@ -37,7 +38,8 @@ export function registerWebhookRoutes(
   app: FastifyInstance,
   chat: ChatService,
   store: SqliteStore,
-  config: AppConfig
+  config: AppConfig,
+  provider: SmsProvider
 ): void {
   app.get("/api/webhooks/voipms/:secret", {
     config: { rateLimit: { max: 240, timeWindow: "1 minute" } }
@@ -79,6 +81,7 @@ export function registerWebhookRoutes(
     });
 
     androidRoutes.post("/api/webhooks/android/:secret", {
+      bodyLimit: Math.ceil(config.imageUploadMaxBytes * 4 / 3) + 256 * 1024,
       config: { rateLimit: { max: 600, timeWindow: "1 minute" } }
     }, async (request, reply) => {
       const { secret } = z.object({ secret: z.string().min(16).max(256) }).parse(request.params);
@@ -140,6 +143,47 @@ export function registerWebhookRoutes(
         });
         if (!result.ignored) {
           store.recordSecurityEvent(result.duplicate ? "ANDROID_SMS_DUPLICATE" : "ANDROID_SMS_ACCEPTED");
+        }
+        return reply.send({ ok: true });
+      }
+
+      if (event.event === "mms:received") {
+        store.recordSecurityEvent("ANDROID_MMS_ARRIVAL");
+        return reply.send({ ok: true });
+      }
+
+      if (event.event === "mms:downloaded") {
+        const sender = event.payload.sender ?? event.payload.phoneNumber;
+        if (!sender) {
+          store.recordSecurityEvent("ANDROID_MMS_MISSING_SENDER");
+          return reply.send({ ok: true });
+        }
+        const result = await chat.receiveMms({
+          provider: "android_gateway",
+          to: event.payload.recipient ?? config.androidGatewayPhoneNumber ?? "",
+          from: sender,
+          message: event.payload.body ?? "",
+          subject: event.payload.subject ?? undefined,
+          providerMessageId: event.payload.messageId,
+          timestamp: event.payload.receivedAt,
+          attachments: event.payload.attachments.map((attachment) => ({
+            contentType: attachment.contentType,
+            filename: attachment.name ?? undefined,
+            declaredSize: attachment.size ?? undefined,
+            load: async () => {
+              if (attachment.data != null) return Buffer.from(attachment.data, "base64");
+              if (!provider.fetchInboundMedia) {
+                throw new Error("The configured SMS provider cannot retrieve inbound MMS media");
+              }
+              return provider.fetchInboundMedia({
+                messageId: event.payload.messageId,
+                partId: attachment.partId
+              });
+            }
+          }))
+        });
+        if (!result.ignored) {
+          store.recordSecurityEvent(result.duplicate ? "ANDROID_MMS_DUPLICATE" : "ANDROID_MMS_ACCEPTED");
         }
         return reply.send({ ok: true });
       }

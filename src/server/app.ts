@@ -103,7 +103,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<BuiltApp>
   registerAttachmentRoutes(app, auth, chat, store, config);
   registerPushRoutes(app, auth, store, config);
   registerAdminRoutes(app, auth, store, config, worker);
-  registerWebhookRoutes(app, chat, store, config);
+  registerWebhookRoutes(app, chat, store, config, provider);
 
   app.get("/health", async (_request, reply) => {
     const database = store.healthCheck() ? "ok" : "error";

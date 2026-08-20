@@ -107,6 +107,29 @@ describe("Android gateway adapter isolation", () => {
     });
   });
 
+  it("retrieves an inbound MMS attachment through the authenticated inbox API", async () => {
+    const bytes = Buffer.from("image bytes");
+    let capturedUrl = "";
+    let capturedInit: RequestInit | undefined;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      capturedUrl = String(input);
+      capturedInit = init;
+      return new Response(bytes, { status: 200, headers: { "content-type": "application/octet-stream" } });
+    }));
+
+    const result = await new AndroidGatewayProvider(config()).fetchInboundMedia({
+      messageId: "mms/message id",
+      partId: 42
+    });
+
+    expect(result).toEqual(bytes);
+    expect(capturedUrl).toBe("http://192.168.50.25:8080/inbox/mms%2Fmessage%20id/attachments/42");
+    expect(capturedInit?.method).toBe("GET");
+    expect(capturedInit?.headers).toMatchObject({
+      authorization: `Basic ${Buffer.from("gateway-user:gateway-password").toString("base64")}`
+    });
+  });
+
   it("does not retry a permanent validation rejection indefinitely", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: "Invalid destination" }), {
       status: 400,

@@ -1,7 +1,13 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import type { AppConfig } from "../config.js";
-import { SmsProviderError, type SendOptions, type SendResult, type SmsProvider } from "./provider.js";
+import {
+  SmsProviderError,
+  type InboundMediaReference,
+  type SendOptions,
+  type SendResult,
+  type SmsProvider
+} from "./provider.js";
 
 type AndroidMessageResponse = {
   id?: string;
@@ -20,6 +26,8 @@ type AndroidHealthResponse = {
 
 export const ANDROID_GATEWAY_WEBHOOK_EVENTS = [
   "sms:received",
+  "mms:received",
+  "mms:downloaded",
   "sms:sent",
   "sms:delivered",
   "sms:failed",
@@ -44,6 +52,13 @@ const statusPayload = {
   phoneNumber: nullablePhone,
   simNumber: nullableSim
 };
+const mmsBasePayload = {
+  messageId: z.string().trim().min(1).max(200),
+  sender: nullablePhone,
+  recipient: nullablePhone,
+  phoneNumber: nullablePhone,
+  simNumber: nullableSim
+};
 const healthCheckSchema = z.object({
   description: z.string().max(300).optional(),
   observedUnit: z.string().max(80).optional(),
@@ -62,6 +77,35 @@ export const androidGatewayWebhookSchema = z.discriminatedUnion("event", [
       recipient: nullablePhone,
       phoneNumber: nullablePhone,
       simNumber: nullableSim,
+      receivedAt: z.string().max(100).optional()
+    }).passthrough()
+  }).passthrough(),
+  z.object({
+    ...eventFields,
+    event: z.literal("mms:received"),
+    payload: z.object({
+      ...mmsBasePayload,
+      transactionId: z.string().trim().max(300).optional(),
+      subject: z.string().max(10_000).nullable().optional(),
+      size: z.number().int().nonnegative().nullable().optional(),
+      contentClass: z.string().trim().max(120).optional(),
+      receivedAt: z.string().max(100).optional()
+    }).passthrough()
+  }).passthrough(),
+  z.object({
+    ...eventFields,
+    event: z.literal("mms:downloaded"),
+    payload: z.object({
+      ...mmsBasePayload,
+      body: z.string().max(10_000).nullable().optional(),
+      subject: z.string().max(10_000).nullable().optional(),
+      attachments: z.array(z.object({
+        partId: z.number().int().nonnegative(),
+        contentType: z.string().trim().min(1).max(200),
+        data: z.string().max(30_000_000).regex(/^[A-Za-z0-9+/]*={0,2}$/).nullable().optional(),
+        name: z.string().max(300).nullable().optional(),
+        size: z.number().int().nonnegative().nullable().optional()
+      }).passthrough()).max(10),
       receivedAt: z.string().max(100).optional()
     }).passthrough()
   }).passthrough(),
@@ -223,6 +267,27 @@ export class AndroidGatewayProvider implements SmsProvider {
       throw new SmsProviderError(`Android gateway health check returned HTTP ${response.status}`, response.status >= 500, `HTTP_${response.status}`);
     }
     return this.readJson<AndroidHealthResponse>(response);
+  }
+
+  async fetchInboundMedia(reference: InboundMediaReference): Promise<Buffer> {
+    this.assertConfigured();
+    const response = await this.request(
+      `inbox/${encodeURIComponent(reference.messageId)}/attachments/${encodeURIComponent(String(reference.partId))}`,
+      { method: "GET" }
+    );
+    if (!response.ok) {
+      const transient = response.status === 404 || response.status === 408 || response.status === 425 || response.status === 429 || response.status >= 500;
+      throw new SmsProviderError(
+        `Android gateway could not retrieve an inbound MMS attachment (HTTP ${response.status})`,
+        transient,
+        `HTTP_${response.status}`
+      );
+    }
+    const data = Buffer.from(await response.arrayBuffer());
+    if (data.length === 0 || data.length > this.config.imageUploadMaxBytes) {
+      throw new SmsProviderError("Inbound MMS attachment is empty or exceeds the configured photo limit", false, "INVALID_MEDIA_SIZE");
+    }
+    return data;
   }
 
   async configureWebhookSigningKey(signingKey: string): Promise<void> {

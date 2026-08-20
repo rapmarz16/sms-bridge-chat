@@ -33,4 +33,4 @@ for (const event of ANDROID_GATEWAY_WEBHOOK_EVENTS) {
   process.stdout.write(`Registered ${event}\n`);
 }
 
-process.stdout.write("Android gateway webhooks are registered. Restart the gateway app and send one inbound test SMS.\n");
+process.stdout.write("Android gateway webhooks are registered. Restart the gateway app, then send one inbound SMS and one inbound photo MMS.\n");

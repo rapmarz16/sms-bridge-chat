@@ -1,4 +1,7 @@
 import { createHmac } from "node:crypto";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import sharp from "sharp";
 import { afterEach, describe, expect, it } from "vitest";
 import type { DeliveryMode, Member, Role } from "../src/server/domain.js";
 import { createTestContext, login, type TestContext } from "./helpers.js";
@@ -100,6 +103,66 @@ describe("Android gateway signed webhooks", () => {
     expect(context.built.store.listMessages(context.built.store.getDefaultGroup().id, { limit: 10 })[0])
       .toMatchObject({ senderName: "David", body: "Legacy payload", source: "SMS" });
     expect(context.built.store.listRecentSmsEvents()[0]?.eventType).toBe("ANDROID_SMS_ACCEPTED");
+  });
+
+  it("stores an inbound MMS photo once, shows it in the PWA, and avoids sender echo", async () => {
+    context = await androidContext();
+    const david = addMember(context, "David", "+14165550515", "SMS");
+    addMember(context, "Sarah", "+14165550516", "SMS");
+    const raphael = addMember(context, "Raphael", "+14165550517", "APP", "ADMIN");
+    const source = await sharp({
+      create: { width: 100, height: 70, channels: 3, background: { r: 30, g: 120, b: 80 } }
+    }).jpeg().toBuffer();
+    const event = baseEvent("mms:downloaded", {
+      messageId: "android-mms-1",
+      sender: david.phoneNumberE164,
+      recipient: PHONE_NUMBER,
+      simNumber: 1,
+      body: "Family photo",
+      subject: null,
+      attachments: [{
+        partId: 7,
+        contentType: "image/jpeg",
+        name: "camera.jpg",
+        size: source.length,
+        data: source.toString("base64")
+      }],
+      receivedAt: "2026-08-20T12:00:00-04:00"
+    }, "mms-downloaded-event");
+
+    const first = await postEvent(context, event);
+    const duplicate = await postEvent(context, { ...event, id: "mms-retry-event" });
+    expect(first.statusCode).toBe(200);
+    expect(duplicate.statusCode).toBe(200);
+
+    const messages = context.built.store.listMessages(context.built.store.getDefaultGroup().id, { limit: 10 });
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      senderName: "David",
+      source: "SMS",
+      body: "Family photo",
+      attachments: [{ originalFilename: "camera.jpg", mimeType: "image/webp" }]
+    });
+    const attachment = messages[0]!.attachments[0]!;
+    expect(existsSync(join(context.config.uploadsPath, `${attachment.id}.webp`))).toBe(true);
+
+    const auth = await login(context, raphael.id);
+    const downloaded = await context.built.app.inject({
+      method: "GET",
+      url: attachment.url,
+      headers: { cookie: auth.cookie }
+    });
+    expect(downloaded.statusCode).toBe(200);
+    expect(downloaded.headers["content-type"]).toContain("image/webp");
+
+    await context.built.worker.drainOnce();
+    expect(context.provider.sent).toHaveLength(1);
+    expect(context.provider.sent[0]).toMatchObject({
+      to: "+14165550516",
+      text: "David: Family photo\n[Photo — view in app]"
+    });
+    expect(context.built.store.listRecentSmsEvents().map((item) => item.eventType))
+      .toEqual(expect.arrayContaining(["ANDROID_MMS_ACCEPTED", "ANDROID_MMS_DUPLICATE"]));
   });
 
   it("rejects unsigned, stale, wrong-device, wrong-SIM, and wrong-number callbacks", async () => {

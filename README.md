@@ -2,7 +2,7 @@
 
 A private, self-hosted group chat where installing an app is optional. The application database is the canonical conversation; the PWA and ordinary SMS are two clients of that same conversation.
 
-> Current build status: the text MVP and private in-app photo attachments are implemented and covered by 48 automated tests. It can use either VoIP.ms or a dedicated Android phone/SIM. The remaining production gates are obtaining carrier approval for the expected automated volume and validating real Canadian/U.S. delivery. Carrier MMS relay remains deliberately deferred.
+> Current build status: the text MVP, private in-app photos, and Android/SIM inbound MMS ingestion are implemented and covered by 50 automated tests. It can use either VoIP.ms or a dedicated Android phone/SIM. The remaining production gates are obtaining carrier approval for the expected automated volume and validating real Canadian/U.S. delivery. Outbound carrier MMS remains unavailable through the released Android gateway.
 
 ## What is implemented
 
@@ -18,11 +18,11 @@ A private, self-hosted group chat where installing an app is optional. The appli
 - Administrator member management, bridge kill switch, usage display, and delivery failures
 - Persistent per-recipient SMS delivery rows and provider attempt accounting
 - Provider-neutral `SmsProvider` interface with isolated VoIP.ms and Android/SIM adapters
-- HMAC-signed Android webhooks for inbound SMS, status, and phone health
+- HMAC-signed Android webhooks for inbound SMS/MMS, status, and phone health
 - Idempotent provider callbacks and unknown-number allow-list behavior
 - Docker/Compose packaging, Unraid-friendly ownership, mounted data, and `/health`
 
-Carrier MMS relay remains intentionally gated until the text bridge has been proven with real Canadian and U.S. phones, as required by the product plan. PWA-to-PWA photos do not depend on MMS and are available now.
+Incoming MMS photos from active SMS members are ingested into the private PWA conversation. PWA-to-PWA photos do not depend on MMS. The released Android gateway is receive-only for MMS, so PWA photos cannot yet be transmitted as carrier MMS to SMS-only members.
 
 ## Architecture
 
@@ -134,7 +134,11 @@ Use the **＋** button in the composer to choose a JPEG, PNG, WebP, or AVIF phot
 
 A caption is optional. The default upload limit is 5 MB and the default maximum processed dimension is 1920 pixels. These can be adjusted with `IMAGE_UPLOAD_MAX_BYTES`, `IMAGE_MAX_DIMENSION`, and `IMAGE_WEBP_QUALITY`. Keep `/data/uploads` in the same backup set as `chat.db`.
 
-Photos currently travel PWA-to-PWA. SMS members receive `[Photo — view in app]` with any caption, without exposing a public media URL. SIM/carrier MMS transmission and inbound MMS ingestion remain a separately gated phase.
+Photos uploaded in the PWA travel PWA-to-PWA. SMS members receive `[Photo — view in app]` with any caption, without exposing a public media URL.
+
+With the Android/SIM provider, an active SMS member can also send a photo MMS to the gateway number. The signed `mms:downloaded` callback is allow-listed by sender and destination, deduplicated by the provider message ID, decoded or fetched through the phone's private inbox API, validated as an image, stripped of metadata, resized, and stored in `/data/uploads`. It then appears as an ordinary photo in the PWA. The original sender is not echoed; other SMS-only members receive the text caption and private-app photo marker.
+
+The released SMS Gateway for Android API currently supports **receiving MMS only**. It does not expose an outbound MMS request, so the bridge deliberately does not claim to send PWA photos to SMS-only members as MMS. See the gateway's [MMS support documentation](https://docs.sms-gate.app/features/mms/). Do not install an unmerged development APK on the production relay phone solely to bypass this limitation.
 
 ## Android phone and physical SIM setup
 
@@ -155,7 +159,7 @@ The integration uses the Apache-2.0 [SMS Gateway for Android](https://github.com
 
 ### 2. Configure SMS Gateway for Android
 
-1. Install the secure release APK and grant `SEND_SMS`, `RECEIVE_SMS`, and `READ_PHONE_STATE`. `READ_SMS` is optional and is not needed for live bridging.
+1. Install the secure release APK and grant `SEND_SMS`, `RECEIVE_SMS`, `RECEIVE_MMS`, and `READ_PHONE_STATE`. `READ_SMS` is optional and is not needed for live bridging. Keep mobile data enabled for the gateway SIM because many carriers download MMS over the cellular APN even while Wi-Fi is connected.
 2. On the Home tab, note the displayed **Device ID**.
 3. Enable **Local Server**, tap **Offline** so it becomes **Online**, and note:
    - the phone's local IP and port `8080`
@@ -220,7 +224,7 @@ On Unraid's Docker console, the equivalent command is:
 node dist/server/cli/configure-android-gateway.js
 ```
 
-The command first checks the phone's `/health` endpoint, applies `ANDROID_GATEWAY_WEBHOOK_SIGNING_KEY` through the phone's write-only settings API, then safely replaces only the deterministic `sms-bridge-chat-*` registrations for `sms:received`, `sms:sent`, `sms:delivered`, `sms:failed`, `sms:cancelled`, `system:ping`, and `app:started`. It never prints the phone credentials, signing key, or webhook URL secret.
+The command first checks the phone's `/health` endpoint, applies `ANDROID_GATEWAY_WEBHOOK_SIGNING_KEY` through the phone's write-only settings API, then safely replaces only the deterministic `sms-bridge-chat-*` registrations for `sms:received`, `mms:received`, `mms:downloaded`, `sms:sent`, `sms:delivered`, `sms:failed`, `sms:cancelled`, `system:ping`, and `app:started`. It never prints the phone credentials, signing key, or webhook URL secret.
 
 After registration, restart the gateway app once and confirm the Admin screen shows the carrier/check-in rather than `stale`. Then change `SMS_ENABLED=true` and restart the container.
 
@@ -246,6 +250,7 @@ No USB device mapping, privileged Docker mode, or host networking is required. A
 6. Turn off cellular service, send a PWA message, and confirm canonical chat remains available and the delivery failure is visible.
 7. Re-enable service and use the administrator Retry action.
 8. Reboot the phone, router, and container and confirm phone health and message flow recover.
+9. Send one JPEG photo by MMS from a known member to the gateway number and confirm it appears once in the PWA. This validates inbound only; the released phone gateway cannot send outbound MMS.
 
 Begin with `SMS_DAILY_LIMIT=100` and increase it only after observing real usage and receiving carrier approval. At 100 group messages/day, 10–12 SMS recipients can create roughly 900–1,200 outbound deliveries/day before multipart expansion.
 
@@ -342,7 +347,7 @@ Before calling the deployment production-ready, test this matrix with actual pho
 - Bridge kill switch while ordinary PWA chat continues
 - Usage warnings at configured 80%, 95%, and 100% thresholds
 
-Do not enable carrier MMS relay until this text matrix passes. Private in-app photos do not use MMS.
+Do not experiment with outbound carrier MMS until this text matrix passes. Private in-app photos and supported inbound MMS ingestion do not require outbound MMS capability.
 
 ## Safety defaults
 
@@ -375,7 +380,7 @@ The GitHub CI workflow repeats tests, the production build, and a real `docker b
 
 ## Automated coverage
 
-`npm test` currently runs 47 tests covering:
+`npm test` currently runs 50 tests covering:
 
 - OTP sessions, CSRF, member administration, persistence, and authenticated Socket.IO delivery
 - Known/unknown inbound numbers, wrong DID, bad secret, duplicate provider IDs, and bridge shutdown
@@ -389,6 +394,7 @@ The GitHub CI workflow repeats tests, the production build, and a real `docker b
 - Web Push subscription security, background fan-out, sender exclusion, and expired-endpoint cleanup
 - Own-message/admin deletion authorization, tombstones, and non-retractable SMS behavior
 - Authenticated photo upload/retrieval, content validation, conversion, size limits, deletion privacy, and SMS fallback text
+- Signed inbound MMS image ingestion, provider-ID deduplication, private storage/retrieval, sender allow-list behavior, and no sender echo
 
 ## Environment
 
@@ -402,6 +408,7 @@ The complete, comment-documented list is in `.env.example`. Secrets are server-o
 - [x] Milestone 4 — retries, limits, outage handling, monitoring, redacted logs
 - [x] Milestone 5 — safe Markdown, replies, reactions, link-preserving SMS rendering
 - [x] Milestone 6a — private in-app image uploads, processing, storage, display, and SMS fallback marker
-- [ ] Milestone 6b — outbound/inbound carrier MMS, intentionally waiting for real-phone text validation
+- [x] Milestone 6b — Android/SIM inbound MMS ingestion into the canonical PWA conversation
+- [ ] Milestone 6c — outbound carrier MMS, blocked on a stable released provider API and real-phone validation
 
 See `docs/IMPLEMENTATION_STATUS.md` for the remaining production assumptions and intentionally deferred work.

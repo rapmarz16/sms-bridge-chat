@@ -20,6 +20,7 @@
 - Selectable VoIP.ms or Android/SIM provider behind one provider interface
 - Secret-protected inbound VoIP.ms callback
 - HMAC-signed Android callbacks for inbound SMS, delivery states, startup, and health pings
+- Signed Android `mms:received`/`mms:downloaded` callbacks with sender allow-list, provider-ID idempotency, private image processing/storage, and PWA delivery
 - DID validation, E.164 normalization, member allow-list
 - Provider-ID idempotency within the same transaction as message persistence
 - Per-recipient delivery rows created atomically with the canonical message
@@ -52,11 +53,11 @@
 5. The VoIP.ms callback uses a GET query containing message text. Application logging omits full URLs, but the deployment reverse proxy must also disable or redact query-string access logging for this route.
 6. A job that was already marked `SENDING` during an unclean process death has an unknowable provider outcome because VoIP.ms does not expose a client idempotency key in the public material. The worker chooses at-most-once restart behavior: it marks that delivery failed for explicit administrator review instead of silently resending a possible duplicate.
 7. Consumer-plan “unlimited texting” may not authorize an automated relay or roughly 900–1,200 outbound deliveries/day. Written carrier confirmation and a deliberately conservative phone-side rate limit remain production gates.
-8. Carrier MMS send/receive remains out of scope until bidirectional text is tested with actual Canadian and U.S. mobile numbers. Private PWA photo attachments are implemented independently of MMS; SMS recipients receive an app-only photo marker.
+8. The released SMS Gateway for Android build supports MMS receive only. Incoming photos can now enter the canonical PWA conversation, but outbound PWA-to-carrier MMS remains blocked until a stable released provider API exists and bidirectional text is tested with actual Canadian and U.S. mobile numbers. SMS recipients still receive an app-only photo marker for PWA-originated photos.
 
 ## Local verification snapshot
 
-- 47 automated tests pass.
+- 50 automated tests pass.
 - TypeScript server and PWA type checks pass.
 - The optimized production server/PWA build passes.
 - A production-mode runtime smoke test serves the PWA and reports `{"status":"ok","database":"ok"}`.

@@ -14,10 +14,16 @@ export type MediaItem = {
   mimeType: string;
 };
 
+export type InboundMediaReference = {
+  messageId: string;
+  partId: string | number;
+};
+
 export interface SmsProvider {
   readonly name: string;
   sendSms(to: string, text: string, options?: SendOptions): Promise<SendResult>;
   sendMms?(to: string, text: string, media: MediaItem[]): Promise<SendResult>;
+  fetchInboundMedia?(reference: InboundMediaReference): Promise<Buffer>;
 }
 
 export class SmsProviderError extends Error {
