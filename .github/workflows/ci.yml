@@ -17,6 +17,7 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - run: npm run security:audit
       - run: npm test
       - run: npm run build
       - name: Build Docker image

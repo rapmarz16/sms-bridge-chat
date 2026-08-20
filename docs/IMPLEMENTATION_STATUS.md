@@ -40,3 +40,12 @@
 4. The VoIP.ms callback uses a GET query containing message text. Application logging omits full URLs, but the deployment reverse proxy must also disable or redact query-string access logging for this route.
 5. A job that was already marked `SENDING` during an unclean process death has an unknowable provider outcome because VoIP.ms does not expose a client idempotency key in the public material. The worker chooses at-most-once restart behavior: it marks that delivery failed for explicit administrator review instead of silently resending a possible duplicate.
 6. MMS remains out of scope until bidirectional text is tested with actual Canadian and U.S. mobile numbers, as required by the build order.
+
+## Local verification snapshot
+
+- 25 automated tests pass.
+- TypeScript server and PWA type checks pass.
+- The optimized production server/PWA build passes.
+- A production-mode runtime smoke test serves the PWA and reports `{"status":"ok","database":"ok"}`.
+- The production dependency audit reports zero known vulnerabilities.
+- Docker Compose YAML parses successfully; the GitHub CI workflow performs the unavailable local `docker build` gate.

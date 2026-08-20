@@ -201,6 +201,7 @@ Do not enable images/MMS until this text matrix passes.
 | --- | --- |
 | `npm run dev` | Run the API and PWA development servers |
 | `npm test` | Run automated integration and reliability tests |
+| `npm run security:audit` | Check production dependencies for published vulnerabilities |
 | `npm run typecheck` | Type-check server and PWA |
 | `npm run build` | Build production server and static PWA |
 | `npm run db:migrate:dev` | Apply local database migrations |
