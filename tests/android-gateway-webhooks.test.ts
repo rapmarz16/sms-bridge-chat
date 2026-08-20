@@ -86,6 +86,22 @@ describe("Android gateway signed webhooks", () => {
     expect(context.provider.sent[0]?.options?.idempotencyKey).toBeTruthy();
   });
 
+  it("accepts the legacy phoneNumber sender field used by older gateway releases", async () => {
+    context = await androidContext();
+    const david = addMember(context, "David", "+14165550514", "SMS");
+    const response = await postEvent(context, baseEvent("sms:received", {
+      messageId: "legacy-inbound-1",
+      message: "Legacy payload",
+      phoneNumber: david.phoneNumberE164,
+      recipient: PHONE_NUMBER,
+      simNumber: 1
+    }));
+    expect(response.statusCode).toBe(200);
+    expect(context.built.store.listMessages(context.built.store.getDefaultGroup().id, { limit: 10 })[0])
+      .toMatchObject({ senderName: "David", body: "Legacy payload", source: "SMS" });
+    expect(context.built.store.listRecentSmsEvents()[0]?.eventType).toBe("ANDROID_SMS_ACCEPTED");
+  });
+
   it("rejects unsigned, stale, wrong-device, wrong-SIM, and wrong-number callbacks", async () => {
     context = await androidContext();
     addMember(context, "David", "+14165550521", "SMS");

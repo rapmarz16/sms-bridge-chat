@@ -3,6 +3,7 @@ import type { ChatMessage, Reaction } from "./domain.js";
 
 export type AppEvents = {
   message: [ChatMessage];
+  "message:deleted": [{ messageId: string; groupId: string; deletedAt: string }];
   reaction: [Reaction];
   "reaction:removed": [{ messageId: string; memberId: string; emoji: string }];
 };

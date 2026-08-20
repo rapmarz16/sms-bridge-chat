@@ -20,8 +20,16 @@ const envSchema = z.object({
   TRUST_PROXY: z.string().trim().default("false"),
   APP_BASE_URL: z.string().url().default("http://localhost:3000"),
   SESSION_SECRET: z.string().min(16).default("development-only-change-this-secret"),
+  WEB_PUSH_ENABLED: booleanValue,
+  WEB_PUSH_VAPID_PUBLIC_KEY: optionalText,
+  WEB_PUSH_VAPID_PRIVATE_KEY: optionalText,
+  WEB_PUSH_VAPID_SUBJECT: optionalText,
+  WEB_PUSH_TTL_SECONDS: z.coerce.number().int().min(60).max(2_419_200).default(86_400),
   DATABASE_PATH: z.string().default("/data/chat.db"),
   UPLOADS_PATH: z.string().default("/data/uploads"),
+  IMAGE_UPLOAD_MAX_BYTES: z.coerce.number().int().min(65_536).max(20 * 1024 * 1024).default(5 * 1024 * 1024),
+  IMAGE_MAX_DIMENSION: z.coerce.number().int().min(640).max(4096).default(1920),
+  IMAGE_WEBP_QUALITY: z.coerce.number().int().min(50).max(95).default(82),
   GROUP_NAME: z.string().trim().min(1).max(80).default("Family Chat"),
   DEFAULT_PHONE_REGION: z.string().length(2).default("CA"),
   SMS_PROVIDER: z.enum(["voipms", "android_gateway"]).default("voipms"),
@@ -65,8 +73,16 @@ export type AppConfig = {
   trustProxy: boolean | string;
   appBaseUrl: string;
   sessionSecret: string;
+  webPushEnabled: boolean;
+  webPushVapidPublicKey?: string;
+  webPushVapidPrivateKey?: string;
+  webPushVapidSubject: string;
+  webPushTtlSeconds: number;
   databasePath: string;
   uploadsPath: string;
+  imageUploadMaxBytes: number;
+  imageMaxDimension: number;
+  imageWebpQuality: number;
   groupName: string;
   defaultPhoneRegion: string;
   smsProvider: "voipms" | "android_gateway";
@@ -107,16 +123,34 @@ export type AppConfig = {
 
 export function loadConfig(source: NodeJS.ProcessEnv = process.env): AppConfig {
   const env = envSchema.parse(source);
+  const appUrl = new URL(env.APP_BASE_URL);
+  if (appUrl.pathname !== "/" || appUrl.search || appUrl.hash || appUrl.username || appUrl.password) {
+    throw new Error("APP_BASE_URL must contain only the public origin, without a path, query, credentials, or fragment");
+  }
+  const appBaseUrl = appUrl.origin;
+  const webPushVapidSubject = env.WEB_PUSH_VAPID_SUBJECT ?? (appUrl.protocol === "https:" ? appBaseUrl : "mailto:admin@localhost");
+  const subjectUrl = new URL(webPushVapidSubject);
+  if (env.WEB_PUSH_ENABLED && !["https:", "mailto:"].includes(subjectUrl.protocol)) {
+    throw new Error("WEB_PUSH_VAPID_SUBJECT must be an HTTPS URL or mailto address");
+  }
   const smsDid = env.SMS_PROVIDER === "android_gateway" ? env.ANDROID_GATEWAY_PHONE_NUMBER : env.VOIPMS_DID;
   const config: AppConfig = {
     nodeEnv: env.NODE_ENV,
     host: env.HOST,
     port: env.PORT,
     trustProxy: env.TRUST_PROXY === "true" ? true : env.TRUST_PROXY === "false" ? false : env.TRUST_PROXY,
-    appBaseUrl: env.APP_BASE_URL.replace(/\/$/, ""),
+    appBaseUrl,
     sessionSecret: env.SESSION_SECRET,
+    webPushEnabled: env.WEB_PUSH_ENABLED,
+    webPushVapidPublicKey: env.WEB_PUSH_VAPID_PUBLIC_KEY,
+    webPushVapidPrivateKey: env.WEB_PUSH_VAPID_PRIVATE_KEY,
+    webPushVapidSubject,
+    webPushTtlSeconds: env.WEB_PUSH_TTL_SECONDS,
     databasePath: env.DATABASE_PATH === ":memory:" ? ":memory:" : resolve(env.DATABASE_PATH),
     uploadsPath: resolve(env.UPLOADS_PATH),
+    imageUploadMaxBytes: env.IMAGE_UPLOAD_MAX_BYTES,
+    imageMaxDimension: env.IMAGE_MAX_DIMENSION,
+    imageWebpQuality: env.IMAGE_WEBP_QUALITY,
     groupName: env.GROUP_NAME,
     defaultPhoneRegion: env.DEFAULT_PHONE_REGION.toUpperCase(),
     smsProvider: env.SMS_PROVIDER,
@@ -152,7 +186,7 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): AppConfig {
     smsTextMaxLength: env.SMS_TEXT_MAX_LENGTH,
     timezone: env.TZ,
     logLevel: env.LOG_LEVEL,
-    secureCookies: env.APP_BASE_URL.startsWith("https://")
+    secureCookies: appUrl.protocol === "https:"
   };
 
   if (config.nodeEnv === "production" && config.sessionSecret.length < 32) {
@@ -163,6 +197,13 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): AppConfig {
   }
   if (config.nodeEnv === "production" && config.devOtpBypassCode) {
     throw new Error("DEV_OTP_BYPASS_CODE cannot be enabled in production");
+  }
+  if (config.webPushEnabled) {
+    const missing = [
+      ["WEB_PUSH_VAPID_PUBLIC_KEY", config.webPushVapidPublicKey],
+      ["WEB_PUSH_VAPID_PRIVATE_KEY", config.webPushVapidPrivateKey]
+    ].filter(([, value]) => !value).map(([name]) => name);
+    if (missing.length > 0) throw new Error(`WEB_PUSH_ENABLED requires: ${missing.join(", ")}`);
   }
   if (config.smsEnabled) {
     const required = config.smsProvider === "android_gateway" ? [

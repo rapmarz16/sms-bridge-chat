@@ -5,7 +5,8 @@ import type { SqliteStore } from "../db/store.js";
 import { localDayKey } from "../markdown.js";
 import type { AuthService } from "../services/auth-service.js";
 import type { ChatService } from "../services/chat-service.js";
-import { requireCsrf, requireMember } from "./guards.js";
+import { acceptedImageMimeTypes } from "../services/image-service.js";
+import { HttpError, requireCsrf, requireMember } from "./guards.js";
 
 const publicMember = (member: ReturnType<SqliteStore["getMemberById"]>) => member ? ({
   id: member.id,
@@ -36,6 +37,15 @@ export function registerChatRoutes(
         limit: config.smsDailyLimit,
         percentage: Math.round((used / config.smsDailyLimit) * 100),
         warning: used >= config.smsDailyLimit ? "STOPPED" : used >= config.smsDailyLimit * 0.95 ? "CRITICAL" : used >= config.smsDailyLimit * 0.8 ? "WARNING" : "OK"
+      },
+      pushNotifications: {
+        enabled: config.webPushEnabled,
+        publicKey: config.webPushEnabled ? config.webPushVapidPublicKey : undefined
+      },
+      imageUploads: {
+        enabled: true,
+        maxBytes: config.imageUploadMaxBytes,
+        acceptedTypes: [...acceptedImageMimeTypes]
       }
     };
   });
@@ -76,5 +86,15 @@ export function registerChatRoutes(
     const params = z.object({ messageId: z.string().uuid(), emoji: z.string().max(8) }).parse(request.params);
     chat.removeReaction(member, params.messageId, params.emoji);
     return reply.code(204).send();
+  });
+
+  app.delete("/api/messages/:messageId", async (request) => {
+    const member = requireMember(request, auth);
+    requireCsrf(request, config);
+    const params = z.object({ messageId: z.string().uuid() }).parse(request.params);
+    const result = chat.deleteMessage(member, params.messageId);
+    if (result.status === "NOT_FOUND") throw new HttpError("Message not found", 404, "MESSAGE_NOT_FOUND");
+    if (result.status === "FORBIDDEN") throw new HttpError("You cannot delete this message", 403, "MESSAGE_DELETE_FORBIDDEN");
+    return { message: result.message };
   });
 }

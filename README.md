@@ -2,7 +2,7 @@
 
 A private, self-hosted group chat where installing an app is optional. The application database is the canonical conversation; the PWA and ordinary SMS are two clients of that same conversation.
 
-> Current build status: the complete text MVP is implemented and covered by 34 automated tests. It can use either VoIP.ms or a dedicated Android phone/SIM. The remaining production gates are installing the phone, obtaining carrier approval for the expected automated volume, and validating real Canadian/U.S. delivery. Images/MMS remain deliberately deferred.
+> Current build status: the text MVP and private in-app photo attachments are implemented and covered by 47 automated tests. It can use either VoIP.ms or a dedicated Android phone/SIM. The remaining production gates are obtaining carrier approval for the expected automated volume and validating real Canadian/U.S. delivery. Carrier MMS relay remains deliberately deferred.
 
 ## What is implemented
 
@@ -11,7 +11,9 @@ A private, self-hosted group chat where installing an app is optional. The appli
 - Six-digit SMS OTP flow, hashed challenges, bounded attempts, and durable sessions
 - Secure HTTP-only session cookies plus CSRF and same-origin checks
 - Canonical SQLite message history with WAL mode and automated migrations
-- Socket.IO realtime events; the database remains authoritative after reconnects
+- Socket.IO foreground realtime plus standards-based Web Push when the installed PWA is backgrounded or closed
+- Authorized soft deletion for a member's own app messages and administrator moderation
+- Authenticated in-app photo upload, metadata stripping, resize/compression, and private retrieval
 - Administrator member management, bridge kill switch, usage display, and delivery failures
 - Persistent per-recipient SMS delivery rows and provider attempt accounting
 - Provider-neutral `SmsProvider` interface with isolated VoIP.ms and Android/SIM adapters
@@ -19,7 +21,7 @@ A private, self-hosted group chat where installing an app is optional. The appli
 - Idempotent provider callbacks and unknown-number allow-list behavior
 - Docker/Compose packaging, Unraid-friendly ownership, mounted data, and `/health`
 
-Images/MMS remain intentionally gated until the text bridge has been proven with real Canadian and U.S. phones, as required by the product plan.
+Carrier MMS relay remains intentionally gated until the text bridge has been proven with real Canadian and U.S. phones, as required by the product plan. PWA-to-PWA photos do not depend on MMS and are available now.
 
 ## Architecture
 
@@ -28,6 +30,9 @@ flowchart TD
     PWA["React PWA"] -->|"HTTPS / Socket.IO"| App["Fastify application"]
     Webhook["Provider webhook"] -->|HTTPS| App
     App --> DB["SQLite /data/chat.db"]
+    App --> Files["Private photos /data/uploads"]
+    App --> Push["Web Push service"]
+    Push --> PWA
     App --> Worker["Persistent delivery worker"]
     Worker --> VoIP["VoIP.ms REST API"]
     Worker --> Phone["Android phone LAN API"]
@@ -84,7 +89,7 @@ docker compose exec sms-bridge-chat node dist/server/cli/create-admin.js --name 
 {"status":"ok","database":"ok"}
 ```
 
-6. Put the application behind an HTTPS reverse proxy before using it outside a trusted LAN. Production startup deliberately fails if `APP_BASE_URL` is not HTTPS.
+6. Put the application behind an HTTPS reverse proxy before using it outside a trusted LAN. Production startup deliberately fails if `APP_BASE_URL` is not HTTPS. Set `APP_BASE_URL` to the exact browser origin, such as `https://chat.example.com`; do not add a path. A mismatch produces `Request origin is not allowed` on message sends and other state changes.
 
 All canonical state and uploads are under `/data`. Back up the mapped app-data folder plus the separately protected `.env` values to restore on another Docker host. For a consistent live SQLite backup, use Unraid Appdata Backup with the container stopped, or SQLite's online backup command rather than copying only `chat.db` while the service is writing.
 
@@ -97,6 +102,38 @@ node dist/server/cli/create-admin.js --name "Name" --phone "+14165551234"
 ```
 
 It creates the first member, adds the member to the default group, grants administrator access, and uses `BOTH` delivery mode. Running it again for the same normalized phone number safely restores that member as an active administrator.
+
+## Android and iPhone background notifications
+
+Background alerts use the standard Push API and service worker rather than keeping a WebSocket alive. While the chat is visible, Socket.IO updates the conversation without creating a redundant system alert. When the installed PWA is backgrounded or closed, a notification shows the sender and a short plain-text preview; tapping it focuses or opens the chat. The sender's own devices are excluded, expired browser subscriptions are removed automatically, and reopening always reconciles against canonical SQLite history.
+
+Generate one VAPID key pair after installing the new image:
+
+```bash
+node dist/server/cli/generate-vapid-keys.js
+```
+
+Copy both output values into the corresponding Unraid environment fields, add `WEB_PUSH_ENABLED=true`, apply the container update, and retain the same pair for the lifetime of this deployment. The public key is intentionally sent to authenticated PWA clients; the private key never leaves the server.
+
+On Android:
+
+1. Open the public HTTPS URL in Chrome and choose **Install app** or **Add to Home screen**.
+2. Open the installed app, sign in, then go to **Settings → Background notifications**.
+3. Turn it on and accept Android's notification permission prompt.
+4. If previously denied, use Android **Settings → Apps → SMS Bridge Chat (or Chrome) → Notifications** to allow it.
+5. Test with the PWA fully closed by sending a message from another member or an SMS member.
+
+The same standards-based implementation is compatible with iPhone/iPad Home Screen web apps on supported iOS releases. Safari requires the site to be added to the Home Screen before it can request push permission. iPhone members can remain `SMS`-only for the current rollout; no Apple-specific setup is required until app access is desired.
+
+Deleting a message removes its content from PWA history. A member can delete their own app-originated message, and an administrator can remove any message. SMS copies already sent to phones cannot be recalled, so the interface retains a `Message removed` tombstone and warns before deletion.
+
+## In-app photo attachments
+
+Use the **＋** button in the composer to choose a JPEG, PNG, WebP, or AVIF photo. The server verifies that the bytes decode as an image, rejects oversized or animated input, applies camera orientation, removes metadata, limits the dimensions, and stores a WebP file under `/data/uploads`. Attachment URLs require an active group session and use `private, no-store` browser caching; they are not public share links. If a phone saves high-efficiency HEIC photos, configure its camera for JPEG compatibility before uploading.
+
+A caption is optional. The default upload limit is 5 MB and the default maximum processed dimension is 1920 pixels. These can be adjusted with `IMAGE_UPLOAD_MAX_BYTES`, `IMAGE_MAX_DIMENSION`, and `IMAGE_WEBP_QUALITY`. Keep `/data/uploads` in the same backup set as `chat.db`.
+
+Photos currently travel PWA-to-PWA. SMS members receive `[Photo — view in app]` with any caption, without exposing a public media URL. SIM/carrier MMS transmission and inbound MMS ingestion remain a separately gated phase.
 
 ## Android phone and physical SIM setup
 
@@ -123,7 +160,7 @@ The integration uses the Apache-2.0 [SMS Gateway for Android](https://github.com
    - the phone's local IP and port `8080`
    - Local Server username
    - Local Server password
-4. Open Settings → Webhooks → Signing Key. Set a unique random key of at least 32 characters and store the same value as `ANDROID_GATEWAY_WEBHOOK_SIGNING_KEY` in Unraid.
+4. Create a unique random `ANDROID_GATEWAY_WEBHOOK_SIGNING_KEY` of at least 32 characters in Unraid. The callback-registration command applies it to the phone through the write-only settings API, so it does not need to be copied through Swagger manually.
 5. Open Settings → Ping and enable a 60-second interval. The app uses these signed `system:ping` events for battery, network, version, and stale-phone warnings.
 6. Open Settings → Messages:
    - choose **FIFO** processing so queued chat messages retain conversation order
@@ -158,6 +195,8 @@ ANDROID_GATEWAY_WEBHOOK_MAX_SKEW_SECONDS=300
 ANDROID_GATEWAY_HEALTH_STALE_SECONDS=180
 ```
 
+Use the `simNumber` reported by the phone's `/device` response, not `slotIndex`. For example, `{"simNumber":2,"slotIndex":1}` requires `ANDROID_GATEWAY_SIM_NUMBER=2`.
+
 `APP_BASE_URL` must already be the application's externally valid HTTPS origin. The phone calls:
 
 ```text
@@ -180,9 +219,11 @@ On Unraid's Docker console, the equivalent command is:
 node dist/server/cli/configure-android-gateway.js
 ```
 
-The command first checks the phone's `/health` endpoint, then safely replaces only the deterministic `sms-bridge-chat-*` registrations for `sms:received`, `sms:sent`, `sms:delivered`, `sms:failed`, `sms:cancelled`, `system:ping`, and `app:started`. It never prints the phone credentials or webhook URL secret.
+The command first checks the phone's `/health` endpoint, applies `ANDROID_GATEWAY_WEBHOOK_SIGNING_KEY` through the phone's write-only settings API, then safely replaces only the deterministic `sms-bridge-chat-*` registrations for `sms:received`, `sms:sent`, `sms:delivered`, `sms:failed`, `sms:cancelled`, `system:ping`, and `app:started`. It never prints the phone credentials, signing key, or webhook URL secret.
 
 After registration, restart the gateway app once and confirm the Admin screen shows the carrier/check-in rather than `stale`. Then change `SMS_ENABLED=true` and restart the container.
+
+If an inbound SMS appears on the phone but not in the PWA, open **Admin → Recent inbound diagnostics**. It distinguishes an invalid callback signature, wrong device/SIM, paused bridge, invalid destination, and a sender number that does not exactly match an active member. The gateway's `phoneNumber` legacy sender field is accepted for compatibility with older releases. The header's `SMS connected` label means the bridge is enabled; the Android gateway card's recent check-in confirms that callbacks are actually arriving.
 
 ### 5. Network rules
 
@@ -300,7 +341,7 @@ Before calling the deployment production-ready, test this matrix with actual pho
 - Bridge kill switch while ordinary PWA chat continues
 - Usage warnings at configured 80%, 95%, and 100% thresholds
 
-Do not enable images/MMS until this text matrix passes.
+Do not enable carrier MMS relay until this text matrix passes. Private in-app photos do not use MMS.
 
 ## Safety defaults
 
@@ -327,12 +368,13 @@ Do not enable images/MMS until this text matrix passes.
 | `npm run create-admin -- --name ... --phone ...` | Bootstrap an administrator after production build |
 | `npm run configure-android-gateway:dev` | Check the phone and register signed callbacks during development |
 | `npm run configure-android-gateway` | Check the phone and register signed callbacks after production build |
+| `npm run generate-vapid-keys` | Generate the one-time Web Push public/private key pair |
 
 The GitHub CI workflow repeats tests, the production build, and a real `docker build`. A separate manual/tag workflow publishes an `linux/amd64` image to `ghcr.io/<owner>/sms-bridge-chat` without embedding `.env` values.
 
 ## Automated coverage
 
-`npm test` currently runs 34 tests covering:
+`npm test` currently runs 47 tests covering:
 
 - OTP sessions, CSRF, member administration, persistence, and authenticated Socket.IO delivery
 - Known/unknown inbound numbers, wrong DID, bad secret, duplicate provider IDs, and bridge shutdown
@@ -343,10 +385,13 @@ The GitHub CI workflow repeats tests, the production build, and a real `docker b
 - Isolated VoIP.ms request mapping and the mandatory owner-verification gate
 - Android Local Server request mapping, Basic authentication, stable gateway IDs, and ambiguous-request recovery
 - HMAC validation, stale/replayed callback rejection, inbound idempotency, delivery statuses, and gateway health events
+- Web Push subscription security, background fan-out, sender exclusion, and expired-endpoint cleanup
+- Own-message/admin deletion authorization, tombstones, and non-retractable SMS behavior
+- Authenticated photo upload/retrieval, content validation, conversion, size limits, deletion privacy, and SMS fallback text
 
 ## Environment
 
-The complete, comment-documented list is in `.env.example`. Secrets are server-only and must never be embedded in frontend variables or committed. `SESSION_SECRET` must be at least 32 characters in production. `DEV_OTP_BYPASS_CODE` is rejected in production.
+The complete, comment-documented list is in `.env.example`. Secrets are server-only and must never be embedded in frontend variables or committed. `SESSION_SECRET` must be at least 32 characters in production. `WEB_PUSH_VAPID_PRIVATE_KEY` is server-only; the corresponding public key is safe for browser subscriptions. `DEV_OTP_BYPASS_CODE` is rejected in production.
 
 ## Milestones
 
@@ -355,6 +400,7 @@ The complete, comment-documented list is in `.env.example`. Secrets are server-o
 - [x] Milestone 3 — provider adapter, durable per-recipient fan-out queue, sender prefixes
 - [x] Milestone 4 — retries, limits, outage handling, monitoring, redacted logs
 - [x] Milestone 5 — safe Markdown, replies, reactions, link-preserving SMS rendering
-- [ ] Milestone 6 — image uploads/MMS, intentionally waiting for real-phone text validation
+- [x] Milestone 6a — private in-app image uploads, processing, storage, display, and SMS fallback marker
+- [ ] Milestone 6b — outbound/inbound carrier MMS, intentionally waiting for real-phone text validation
 
 See `docs/IMPLEMENTATION_STATUS.md` for the remaining production assumptions and intentionally deferred work.

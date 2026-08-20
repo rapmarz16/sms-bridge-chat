@@ -125,18 +125,22 @@ export function registerWebhookRoutes(
       store.updateGatewayHealth({ provider: "android_gateway", deviceId: event.deviceId });
 
       if (event.event === "sms:received") {
-        if (!event.payload.sender) {
+        const sender = event.payload.sender ?? event.payload.phoneNumber;
+        if (!sender) {
           store.recordSecurityEvent("ANDROID_SMS_MISSING_SENDER");
           return reply.send({ ok: true });
         }
-        chat.receiveSms({
+        const result = chat.receiveSms({
           provider: "android_gateway",
           to: event.payload.recipient ?? config.androidGatewayPhoneNumber ?? "",
-          from: event.payload.sender,
+          from: sender,
           message: event.payload.message,
           providerMessageId: event.payload.messageId,
           timestamp: event.payload.receivedAt
         });
+        if (!result.ignored) {
+          store.recordSecurityEvent(result.duplicate ? "ANDROID_SMS_DUPLICATE" : "ANDROID_SMS_ACCEPTED");
+        }
         return reply.send({ ok: true });
       }
 

@@ -3,6 +3,7 @@ import { dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 import Database from "better-sqlite3";
 import type {
+  AttachmentInput,
   ChatMessage,
   DeliveryMode,
   Group,
@@ -10,9 +11,12 @@ import type {
   MessageSource,
   Reaction,
   Role,
+  PushSubscriptionRecord,
+  SecurityEvent,
   SmsDelivery,
   SmsDeliveryStatus,
-  SmsGatewayHealth
+  SmsGatewayHealth,
+  StoredAttachment
 } from "../domain.js";
 import { runMigrations } from "./migrations.js";
 
@@ -82,6 +86,19 @@ type GatewayHealthRow = {
   last_event_at: number;
   last_ping_at: number | null;
   last_app_started_at: number | null;
+  updated_at: number;
+};
+
+type PushSubscriptionRow = {
+  id: string;
+  member_id: string;
+  endpoint: string;
+  p256dh: string;
+  auth: string;
+  expiration_time: number | null;
+  failure_count: number;
+  last_success_at: number | null;
+  created_at: number;
   updated_at: number;
 };
 
@@ -183,11 +200,13 @@ export class SqliteStore {
       if (input.active === false) {
         this.db.prepare("UPDATE group_memberships SET active = 0 WHERE member_id = ?").run(id);
         this.db.prepare("DELETE FROM sessions WHERE member_id = ?").run(id);
+        this.db.prepare("DELETE FROM push_subscriptions WHERE member_id = ?").run(id);
       } else if (input.active === true) {
         this.db.prepare("UPDATE group_memberships SET active = 1 WHERE member_id = ?").run(id);
       }
       if (input.phoneNumberE164 && input.phoneNumberE164 !== current.phone_number_e164) {
         this.db.prepare("DELETE FROM sessions WHERE member_id = ?").run(id);
+        this.db.prepare("DELETE FROM push_subscriptions WHERE member_id = ?").run(id);
       }
     })();
     return this.getMemberById(id);
@@ -230,6 +249,7 @@ export class SqliteStore {
     smsProviderName: string;
     fanoutEnabled: boolean;
     excludeSenderFromSms: boolean;
+    attachments?: AttachmentInput[];
   }): { message: ChatMessage; duplicate: boolean; deliveryCount: number } {
     const execute = this.db.transaction(() => {
       if (input.externalProviderId) {
@@ -239,7 +259,7 @@ export class SqliteStore {
         if (existing) return { messageId: existing.id, duplicate: true, deliveryCount: 0 };
       }
       if (input.replyToMessageId) {
-        const reply = this.db.prepare("SELECT group_id FROM messages WHERE id = ?").get(input.replyToMessageId) as { group_id: string } | undefined;
+        const reply = this.db.prepare("SELECT group_id FROM messages WHERE id = ? AND deleted_at IS NULL").get(input.replyToMessageId) as { group_id: string } | undefined;
         if (!reply || reply.group_id !== input.groupId) throw new Error("Reply target is not in this group");
       }
       const group = this.db.prepare("SELECT sms_enabled FROM groups WHERE id = ?").get(input.groupId) as { sms_enabled: number } | undefined;
@@ -262,6 +282,25 @@ export class SqliteStore {
         input.externalProviderId ?? null,
         now
       );
+      const insertAttachment = this.db.prepare(`
+        INSERT INTO attachments(
+          id, message_id, type, storage_path, original_filename,
+          mime_type, size, provider_url, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const attachment of input.attachments ?? []) {
+        insertAttachment.run(
+          attachment.id,
+          messageId,
+          attachment.type,
+          attachment.storagePath,
+          attachment.originalFilename,
+          attachment.mimeType,
+          attachment.size,
+          attachment.providerUrl ?? null,
+          now
+        );
+      }
       const recipients = this.db.prepare(`
         SELECT m.id, m.phone_number_e164 FROM members m
         JOIN group_memberships gm ON gm.member_id = m.id
@@ -295,8 +334,42 @@ export class SqliteStore {
     return row ? this.mapMessages([row])[0] : undefined;
   }
 
+  getStoredAttachment(id: string): StoredAttachment | undefined {
+    const row = this.db.prepare(`
+      SELECT
+        a.id, a.message_id, a.type, a.storage_path, a.original_filename,
+        a.mime_type, a.size, a.provider_url, msg.group_id, msg.deleted_at
+      FROM attachments a
+      JOIN messages msg ON msg.id = a.message_id
+      WHERE a.id = ?
+    `).get(id) as {
+      id: string;
+      message_id: string;
+      type: "IMAGE";
+      storage_path: string;
+      original_filename: string;
+      mime_type: string;
+      size: number;
+      provider_url: string | null;
+      group_id: string;
+      deleted_at: number | null;
+    } | undefined;
+    return row ? {
+      id: row.id,
+      messageId: row.message_id,
+      groupId: row.group_id,
+      type: row.type,
+      storagePath: row.storage_path,
+      originalFilename: row.original_filename,
+      mimeType: row.mime_type,
+      size: row.size,
+      providerUrl: row.provider_url ?? undefined,
+      deleted: row.deleted_at != null
+    } : undefined;
+  }
+
   listMessages(groupId: string, input: { before?: number; after?: number; limit: number }): ChatMessage[] {
-    let clause = "WHERE msg.group_id = ? AND msg.deleted_at IS NULL";
+    let clause = "WHERE msg.group_id = ?";
     const parameters: Array<string | number> = [groupId];
     if (input.before) {
       clause += " AND msg.created_at < ?";
@@ -335,6 +408,15 @@ export class SqliteStore {
   removeReaction(messageId: string, memberId: string, emoji: string): boolean {
     return this.db.prepare("DELETE FROM reactions WHERE message_id = ? AND member_id = ? AND emoji = ?")
       .run(messageId, memberId, emoji).changes > 0;
+  }
+
+  softDeleteMessage(messageId: string): ChatMessage | undefined {
+    this.db.transaction(() => {
+      this.db.prepare("UPDATE messages SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL")
+        .run(Date.now(), messageId);
+      this.db.prepare("DELETE FROM reactions WHERE message_id = ?").run(messageId);
+    })();
+    return this.getMessage(messageId);
   }
 
   createOtpChallenge(input: { memberId: string; codeHash: string; expiresAt: number; maxAttempts: number }): string {
@@ -407,6 +489,82 @@ export class SqliteStore {
   pruneExpiredAuthData(now = Date.now()): void {
     this.db.prepare("DELETE FROM sessions WHERE expires_at <= ?").run(now);
     this.db.prepare("DELETE FROM otp_challenges WHERE expires_at < ?").run(now - 86_400_000);
+  }
+
+  upsertPushSubscription(input: {
+    memberId: string;
+    endpoint: string;
+    p256dh: string;
+    auth: string;
+    expirationTime?: number;
+  }): PushSubscriptionRecord {
+    const now = Date.now();
+    const id = randomUUID();
+    this.db.prepare(`
+      INSERT INTO push_subscriptions(
+        id, member_id, endpoint, p256dh, auth, expiration_time,
+        failure_count, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)
+      ON CONFLICT(endpoint) DO UPDATE SET
+        member_id = excluded.member_id,
+        p256dh = excluded.p256dh,
+        auth = excluded.auth,
+        expiration_time = excluded.expiration_time,
+        failure_count = 0,
+        updated_at = excluded.updated_at
+    `).run(
+      id,
+      input.memberId,
+      input.endpoint,
+      input.p256dh,
+      input.auth,
+      input.expirationTime ?? null,
+      now,
+      now
+    );
+    const row = this.db.prepare("SELECT * FROM push_subscriptions WHERE endpoint = ?")
+      .get(input.endpoint) as PushSubscriptionRow;
+    return this.mapPushSubscription(row);
+  }
+
+  deletePushSubscription(memberId: string, endpoint: string): boolean {
+    return this.db.prepare("DELETE FROM push_subscriptions WHERE member_id = ? AND endpoint = ?")
+      .run(memberId, endpoint).changes > 0;
+  }
+
+  deletePushSubscriptionByEndpoint(endpoint: string): boolean {
+    return this.db.prepare("DELETE FROM push_subscriptions WHERE endpoint = ?")
+      .run(endpoint).changes > 0;
+  }
+
+  listPushSubscriptionsForGroup(groupId: string, excludeMemberId?: string): PushSubscriptionRecord[] {
+    const rows = this.db.prepare(`
+      SELECT ps.* FROM push_subscriptions ps
+      JOIN members m ON m.id = ps.member_id
+      JOIN group_memberships gm ON gm.member_id = m.id
+      WHERE gm.group_id = ? AND gm.active = 1 AND m.active = 1
+        AND m.delivery_mode IN ('APP', 'BOTH')
+        AND (? IS NULL OR m.id <> ?)
+      ORDER BY ps.created_at
+    `).all(groupId, excludeMemberId ?? null, excludeMemberId ?? null) as PushSubscriptionRow[];
+    return rows.map((row) => this.mapPushSubscription(row));
+  }
+
+  markPushSubscriptionSuccess(endpoint: string): void {
+    const now = Date.now();
+    this.db.prepare(`
+      UPDATE push_subscriptions
+      SET failure_count = 0, last_success_at = ?, updated_at = ?
+      WHERE endpoint = ?
+    `).run(now, now, endpoint);
+  }
+
+  markPushSubscriptionFailure(endpoint: string): void {
+    this.db.prepare(`
+      UPDATE push_subscriptions
+      SET failure_count = failure_count + 1, updated_at = ?
+      WHERE endpoint = ?
+    `).run(Date.now(), endpoint);
   }
 
   reserveProviderAttempt(input: {
@@ -595,6 +753,31 @@ export class SqliteStore {
     `).run(randomUUID(), eventType, maskedPhone ?? null, details ? JSON.stringify(details) : null, Date.now());
   }
 
+  listRecentSmsEvents(limit = 20): SecurityEvent[] {
+    const rows = this.db.prepare(`
+      SELECT id, event_type, masked_phone, details_json, created_at
+      FROM security_events
+      WHERE event_type LIKE 'ANDROID_%'
+        OR event_type LIKE 'SMS_%'
+        OR event_type = 'WEBHOOK_WRONG_DID'
+      ORDER BY created_at DESC
+      LIMIT ?
+    `).all(limit) as Array<{
+      id: string;
+      event_type: string;
+      masked_phone: string | null;
+      details_json: string | null;
+      created_at: number;
+    }>;
+    return rows.map((row) => ({
+      id: row.id,
+      eventType: row.event_type,
+      maskedPhone: row.masked_phone ?? undefined,
+      details: row.details_json ? JSON.parse(row.details_json) as Record<string, unknown> : undefined,
+      createdAt: new Date(row.created_at).toISOString()
+    }));
+  }
+
   updateGatewayHealth(input: {
     provider: string;
     deviceId: string;
@@ -672,7 +855,15 @@ export class SqliteStore {
       SELECT
         msg.id, msg.group_id, msg.sender_member_id, sender.display_name AS sender_name,
         msg.source, msg.body, msg.created_at, msg.edited_at, msg.deleted_at,
-        reply.id AS reply_id, reply.body AS reply_body, reply_sender.display_name AS reply_sender_name
+        reply.id AS reply_id,
+        CASE
+          WHEN reply.deleted_at IS NOT NULL THEN 'Message removed'
+          WHEN trim(reply.body) = '' AND EXISTS (
+            SELECT 1 FROM attachments reply_attachment WHERE reply_attachment.message_id = reply.id
+          ) THEN 'Photo'
+          ELSE reply.body
+        END AS reply_body,
+        reply_sender.display_name AS reply_sender_name
       FROM messages msg
       LEFT JOIN members sender ON sender.id = msg.sender_member_id
       LEFT JOIN messages reply ON reply.id = msg.reply_to_message_id
@@ -709,8 +900,8 @@ export class SqliteStore {
         senderName: row.reply_sender_name ?? "System",
         body: row.reply_body ?? ""
       } : undefined,
-      reactions: reactionRows.filter((reaction) => reaction.message_id === row.id).map((reaction) => this.mapReaction(reaction)),
-      attachments: attachmentRows.filter((attachment) => attachment.message_id === row.id).map((attachment) => ({
+      reactions: row.deleted_at ? [] : reactionRows.filter((reaction) => reaction.message_id === row.id).map((reaction) => this.mapReaction(reaction)),
+      attachments: row.deleted_at ? [] : attachmentRows.filter((attachment) => attachment.message_id === row.id).map((attachment) => ({
         id: attachment.id,
         messageId: attachment.message_id,
         type: attachment.type,
@@ -776,6 +967,21 @@ export class SqliteStore {
       attempts: row.attempts,
       lastError: row.last_error ?? undefined,
       nextAttemptAt: iso(row.available_at),
+      createdAt: new Date(row.created_at).toISOString(),
+      updatedAt: new Date(row.updated_at).toISOString()
+    };
+  }
+
+  private mapPushSubscription(row: PushSubscriptionRow): PushSubscriptionRecord {
+    return {
+      id: row.id,
+      memberId: row.member_id,
+      endpoint: row.endpoint,
+      p256dh: row.p256dh,
+      auth: row.auth,
+      expirationTime: row.expiration_time ?? undefined,
+      failureCount: row.failure_count,
+      lastSuccessAt: iso(row.last_success_at),
       createdAt: new Date(row.created_at).toISOString(),
       updatedAt: new Date(row.updated_at).toISOString()
     };

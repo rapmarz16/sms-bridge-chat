@@ -18,6 +18,7 @@
 * { box-sizing: border-box; }
 html, body, #root { min-height: 100%; margin: 0; }
 body { background: var(--paper); color: var(--ink); }
+.visually-hidden { position: absolute !important; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 button, input, textarea, select { font: inherit; }
 button { color: inherit; }
 button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, summary:focus-visible {
@@ -238,10 +239,15 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .mine .reply-context { background: rgba(255,255,255,.1); border-color: #f2a48f; }
 .reply-context strong { font-size: 10px; }
 .reply-context span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; opacity: .72; font-size: 10px; }
-.message-image { display: block; width: min(340px, 100%); border-radius: 10px; margin-top: 8px; }
+.message-image-link { display: block; color: inherit; }
+.message-image { display: block; width: min(340px, 100%); max-height: 420px; object-fit: contain; border-radius: 10px; margin-top: 8px; background: rgba(0,0,0,.04); }
+.message-image-link:first-child .message-image { margin-top: 0; }
 .message-actions { opacity: 0; display: flex; gap: 2px; transition: opacity .15s; }
 .bubble-wrap:hover .message-actions, .message-actions:focus-within { opacity: 1; }
 .message-actions > button, .message-actions summary { width: 28px; height: 28px; display: grid; place-items: center; border: 1px solid #d9ddd7; border-radius: 8px; background: white; color: #60716b; cursor: pointer; list-style: none; font-size: 12px; }
+.message-actions > button.delete-message { color: #a83c27; border-color: #e5bdb4; }
+.message-bubble.deleted { opacity: .72; }
+.message-bubble.deleted .message-body { font-style: italic; }
 .message-actions summary::-webkit-details-marker { display: none; }
 .message-actions details { position: relative; }
 .reaction-menu { position: absolute; bottom: 34px; left: 0; display: flex; gap: 3px; padding: 5px; background: white; border: 1px solid #d7dcd6; border-radius: 12px; box-shadow: var(--shadow); z-index: 4; }
@@ -265,6 +271,14 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .composer-reply strong { color: var(--forest-2); font-size: 10px; }
 .composer-reply span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 10px; }
 .composer-reply button { border: 0; background: transparent; cursor: pointer; font-size: 20px; color: #687972; }
+.photo-preview { display: grid; grid-template-columns: 48px minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 8px 4px; border-bottom: 1px solid #e3e4df; }
+.photo-preview img { width: 48px; height: 48px; object-fit: cover; border-radius: 9px; background: #eef0eb; }
+.photo-preview div { min-width: 0; display: grid; gap: 2px; }
+.photo-preview strong, .photo-preview span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.photo-preview strong { color: var(--forest-2); font-size: 11px; }
+.photo-preview span { color: #77847f; font-size: 9px; }
+.photo-preview button { width: 30px; height: 30px; border: 0; border-radius: 8px; background: transparent; color: #687972; cursor: pointer; font-size: 20px; }
+.photo-preview button:hover { background: #eef0eb; }
 .format-bar { height: 34px; display: flex; align-items: center; gap: 2px; }
 .format-bar button { width: 30px; height: 27px; border: 0; border-radius: 6px; background: transparent; color: #66756f; cursor: pointer; font-size: 13px; }
 .format-bar button:hover:not(:disabled) { background: #eef0eb; color: var(--forest); }
@@ -345,6 +359,11 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .failure-list strong { font-size: 11px; }
 .failure-list span { color: #936355; font-size: 9px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .failure-list button { border: 0; border-radius: 7px; background: white; color: var(--clay-dark); padding: 6px 8px; font-size: 9px; font-weight: 750; cursor: pointer; }
+.event-list { margin-top: 28px; }
+.event-list h4 { font: 500 20px Georgia, serif; margin: 0 0 10px; }
+.event-list > div { display: grid; gap: 3px; border-bottom: 1px solid var(--line); padding: 9px 2px; }
+.event-list span { color: #485852; font-size: 10px; line-height: 1.4; }
+.event-list time { color: #8a948f; font-size: 8px; }
 .inline-dialog { position: fixed; z-index: 5; inset: 80px 18px auto auto; width: min(394px, calc(100% - 36px)); padding: 20px; background: var(--card); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); }
 .dialog-heading { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
 .dialog-heading h4 { margin: 0; font: 500 22px Georgia, serif; }
@@ -362,6 +381,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .setting-row strong { font-size: 12px; }
 .setting-row span { color: #77827e; font-size: 9px; line-height: 1.45; }
 .setting-row .switch { display: block; flex: 0 0 auto; }
+.setting-row:disabled { cursor: not-allowed; opacity: .65; }
 .danger-button { width: 100%; height: 44px; margin-top: 20px; border: 1px solid #e5bdb4; border-radius: 10px; background: #fff3f0; color: #a83c27; font-weight: 750; cursor: pointer; }
 
 @media (max-width: 820px) {

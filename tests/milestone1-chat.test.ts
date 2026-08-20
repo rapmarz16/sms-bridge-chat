@@ -29,6 +29,27 @@ describe("milestone 1 local chat", () => {
     expect(response.json().error).toBe("CSRF_INVALID");
   });
 
+  it("normalizes the configured public origin while rejecting a genuinely different origin", async () => {
+    context = await createTestContext({ APP_BASE_URL: "https://chat.example.com:443/" });
+    const auth = await login(context);
+    const accepted = await context.built.app.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: auth.cookie, "x-csrf-token": auth.csrf, origin: "https://chat.example.com" },
+      payload: { body: "Correct public origin" }
+    });
+    expect(accepted.statusCode).toBe(201);
+
+    const rejected = await context.built.app.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: auth.cookie, "x-csrf-token": auth.csrf, origin: "https://other.example.com" },
+      payload: { body: "Wrong origin" }
+    });
+    expect(rejected.statusCode).toBe(403);
+    expect(rejected.json().error).toBe("ORIGIN_INVALID");
+  });
+
   it("stores an app message, emits it, preserves markdown, and supports replies and reactions", async () => {
     context = await createTestContext();
     const auth = await login(context);

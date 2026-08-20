@@ -41,6 +41,7 @@ const statusPayload = {
   messageId: z.string().trim().min(1).max(200),
   sender: nullablePhone,
   recipient: nullablePhone,
+  phoneNumber: nullablePhone,
   simNumber: nullableSim
 };
 const healthCheckSchema = z.object({
@@ -59,6 +60,7 @@ export const androidGatewayWebhookSchema = z.discriminatedUnion("event", [
       message: z.string().max(10_000),
       sender: nullablePhone,
       recipient: nullablePhone,
+      phoneNumber: nullablePhone,
       simNumber: nullableSim,
       receivedAt: z.string().max(100).optional()
     }).passthrough()
@@ -221,6 +223,22 @@ export class AndroidGatewayProvider implements SmsProvider {
       throw new SmsProviderError(`Android gateway health check returned HTTP ${response.status}`, response.status >= 500, `HTTP_${response.status}`);
     }
     return this.readJson<AndroidHealthResponse>(response);
+  }
+
+  async configureWebhookSigningKey(signingKey: string): Promise<void> {
+    this.assertConfigured();
+    const response = await this.request("settings", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ webhooks: { signing_key: signingKey } })
+    });
+    if (!response.ok) {
+      throw new SmsProviderError(
+        `Android gateway could not configure webhook signing (HTTP ${response.status})`,
+        response.status >= 500,
+        `HTTP_${response.status}`
+      );
+    }
   }
 
   async replaceWebhook(id: string, event: AndroidGatewayWebhookEventName, url: string): Promise<void> {

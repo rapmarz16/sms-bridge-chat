@@ -8,7 +8,11 @@
 - Pre-created member administration
 - Hashed OTP challenge and durable session login
 - Mobile-first PWA, history, replies, reactions, safe Markdown rendering
-- Socket.IO notifications with database-backed reconnect/history behavior
+- Socket.IO foreground delivery plus standards-based background Web Push
+- Per-device push subscriptions, sender exclusion, stale-endpoint cleanup, and notification-click handling
+- Own-app-message and administrator soft deletion with non-retractable SMS warnings
+- Private authenticated photo upload/retrieval with MIME and byte validation
+- Metadata-stripped, dimension-limited WebP processing and persistent `/data/uploads` storage
 - Automated tests and production build
 
 ### Milestones 2–3 — text bridge
@@ -23,6 +27,8 @@
 - Mandatory sender prefixes and no echo to an inbound SMS sender
 - Isolated VoIP.ms and Android Local Server request mappings
 - Android callback-registration CLI, stable outbound gateway IDs, and ambiguous-request recovery
+- Automatic synchronization of the phone's write-only webhook signing key
+- Admin-visible redacted inbound diagnostics and legacy gateway sender-field compatibility
 - Automated known/unknown sender, duplicate callback, wrong DID, kill-switch, and fan-out tests
 
 ### Milestones 4–5 — reliability and rich text
@@ -46,11 +52,11 @@
 5. The VoIP.ms callback uses a GET query containing message text. Application logging omits full URLs, but the deployment reverse proxy must also disable or redact query-string access logging for this route.
 6. A job that was already marked `SENDING` during an unclean process death has an unknowable provider outcome because VoIP.ms does not expose a client idempotency key in the public material. The worker chooses at-most-once restart behavior: it marks that delivery failed for explicit administrator review instead of silently resending a possible duplicate.
 7. Consumer-plan “unlimited texting” may not authorize an automated relay or roughly 900–1,200 outbound deliveries/day. Written carrier confirmation and a deliberately conservative phone-side rate limit remain production gates.
-8. MMS remains out of scope until bidirectional text is tested with actual Canadian and U.S. mobile numbers, as required by the build order.
+8. Carrier MMS send/receive remains out of scope until bidirectional text is tested with actual Canadian and U.S. mobile numbers. Private PWA photo attachments are implemented independently of MMS; SMS recipients receive an app-only photo marker.
 
 ## Local verification snapshot
 
-- 34 automated tests pass.
+- 47 automated tests pass.
 - TypeScript server and PWA type checks pass.
 - The optimized production server/PWA build passes.
 - A production-mode runtime smoke test serves the PWA and reports `{"status":"ok","database":"ok"}`.

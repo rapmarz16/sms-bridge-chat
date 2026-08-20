@@ -75,9 +75,13 @@ export class SmsQueueWorker {
       this.store.markDeliveryFailed(id, "Canonical message not found");
       return;
     }
+    const smsBody = [
+      message.body,
+      message.attachments.length > 0 ? "[Photo — view in app]" : ""
+    ].filter(Boolean).join("\n");
     const text = renderSmsText({
       senderName: message.senderName,
-      body: message.body,
+      body: smsBody,
       replySenderName: message.replyTo?.senderName,
       replyBody: message.replyTo?.body,
       maxLength: this.config.smsTextMaxLength

@@ -1,5 +1,5 @@
 import type { AppConfig } from "../config.js";
-import type { ChatMessage, Member, Reaction } from "../domain.js";
+import type { AttachmentInput, ChatMessage, Member, Reaction } from "../domain.js";
 import type { SqliteStore } from "../db/store.js";
 import type { ChatEventBus } from "../events.js";
 import { markdownToPlainText } from "../markdown.js";
@@ -20,11 +20,15 @@ export class ChatService {
     this.wakeQueue = handler;
   }
 
-  sendAppMessage(member: Member, input: { body: string; replyToMessageId?: string }): ChatMessage {
+  sendAppMessage(member: Member, input: {
+    body?: string;
+    replyToMessageId?: string;
+    attachments?: AttachmentInput[];
+  }): ChatMessage {
     const group = this.store.getDefaultGroup();
     if (!this.store.memberBelongsToGroup(member.id, group.id)) throw new Error("Member is not in this group");
-    const body = input.body.trim();
-    if (!body || !markdownToPlainText(body)) throw new Error("Message cannot be empty");
+    const body = input.body?.trim() ?? "";
+    if ((!body || !markdownToPlainText(body)) && !input.attachments?.length) throw new Error("Message cannot be empty");
     if (body.length > this.config.messageMaxLength) throw new Error(`Message is limited to ${this.config.messageMaxLength} characters`);
     const result = this.store.createCanonicalMessage({
       groupId: group.id,
@@ -34,7 +38,8 @@ export class ChatService {
       replyToMessageId: input.replyToMessageId,
       smsProviderName: this.smsProviderName,
       fanoutEnabled: this.config.smsEnabled,
-      excludeSenderFromSms: false
+      excludeSenderFromSms: false,
+      attachments: input.attachments
     });
     this.events.emit("message", result.message);
     if (result.deliveryCount > 0) this.wakeQueue?.();
@@ -109,5 +114,23 @@ export class ChatService {
     const removed = this.store.removeReaction(messageId, member.id, emoji);
     if (removed) this.events.emit("reaction:removed", { messageId, memberId: member.id, emoji });
     return removed;
+  }
+
+  deleteMessage(member: Member, messageId: string):
+    | { status: "NOT_FOUND" }
+    | { status: "FORBIDDEN" }
+    | { status: "DELETED"; message: ChatMessage } {
+    const message = this.store.getMessage(messageId);
+    if (!message || !this.store.memberBelongsToGroup(member.id, message.groupId)) return { status: "NOT_FOUND" };
+    const canDelete = member.role === "ADMIN" || (message.senderMemberId === member.id && message.source === "APP");
+    if (!canDelete) return { status: "FORBIDDEN" };
+    if (message.deletedAt) return { status: "DELETED", message };
+    const deleted = this.store.softDeleteMessage(messageId)!;
+    this.events.emit("message:deleted", {
+      messageId: deleted.id,
+      groupId: deleted.groupId,
+      deletedAt: deleted.deletedAt!
+    });
+    return { status: "DELETED", message: deleted };
   }
 }

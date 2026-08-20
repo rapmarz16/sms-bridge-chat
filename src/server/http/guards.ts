@@ -33,7 +33,15 @@ export function requireCsrf(request: FastifyRequest, config: AppConfig): void {
     throw new HttpError("Security token is missing or invalid", 403, "CSRF_INVALID");
   }
   const origin = request.headers.origin;
-  if (origin && origin !== config.appBaseUrl) {
-    throw new HttpError("Request origin is not allowed", 403, "ORIGIN_INVALID");
+  if (origin) {
+    let normalizedOrigin: string;
+    try {
+      normalizedOrigin = new URL(origin).origin;
+    } catch {
+      throw new HttpError("Request origin is not allowed", 403, "ORIGIN_INVALID");
+    }
+    if (normalizedOrigin !== config.appBaseUrl) {
+      throw new HttpError("Request origin is not allowed", 403, "ORIGIN_INVALID");
+    }
   }
 }

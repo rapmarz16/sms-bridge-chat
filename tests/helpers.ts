@@ -5,6 +5,8 @@ import type { LightMyRequestResponse } from "fastify";
 import { buildApp, type BuiltApp } from "../src/server/app.js";
 import { loadConfig, type AppConfig } from "../src/server/config.js";
 import type { SendOptions, SendResult, SmsProvider } from "../src/server/sms/provider.js";
+import type { PushTransport } from "../src/server/services/push-notification-service.js";
+import type { PushSubscription } from "web-push";
 
 export class FakeSmsProvider implements SmsProvider {
   readonly sent: Array<{ to: string; text: string; options?: SendOptions }> = [];
@@ -19,6 +21,16 @@ export class FakeSmsProvider implements SmsProvider {
   }
 }
 
+export class FakePushTransport implements PushTransport {
+  readonly sent: Array<{ subscription: PushSubscription; payload: string; ttlSeconds: number }> = [];
+  failure?: unknown;
+
+  async send(subscription: PushSubscription, payload: string, ttlSeconds: number): Promise<void> {
+    this.sent.push({ subscription, payload, ttlSeconds });
+    if (this.failure) throw this.failure;
+  }
+}
+
 export type TestContext = {
   built: BuiltApp;
   config: AppConfig;
@@ -27,7 +39,11 @@ export type TestContext = {
   close: () => Promise<void>;
 };
 
-export async function createTestContext(overrides: Record<string, string> = {}, providerName = "fake"): Promise<TestContext> {
+export async function createTestContext(
+  overrides: Record<string, string> = {},
+  providerName = "fake",
+  pushTransport?: PushTransport
+): Promise<TestContext> {
   const directory = mkdtempSync(join(tmpdir(), "sms-bridge-test-"));
   const config = loadConfig({
     NODE_ENV: "test",
@@ -45,7 +61,7 @@ export async function createTestContext(overrides: Record<string, string> = {}, 
     ...overrides
   });
   const provider = new FakeSmsProvider(providerName);
-  const built = await buildApp({ config, provider, startWorker: false, serveClient: false });
+  const built = await buildApp({ config, provider, pushTransport, startWorker: false, serveClient: false });
   return {
     built,
     config,

@@ -2,6 +2,7 @@
   "name": "SMS Bridge Chat",
   "short_name": "Bridge Chat",
   "description": "A private group chat where installing an app is optional.",
+  "id": "/",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

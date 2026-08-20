@@ -53,6 +53,22 @@ export type Attachment = {
   size: number;
 };
 
+export type AttachmentInput = {
+  id: string;
+  type: "IMAGE";
+  storagePath: string;
+  originalFilename: string;
+  mimeType: string;
+  size: number;
+  providerUrl?: string;
+};
+
+export type StoredAttachment = AttachmentInput & {
+  messageId: string;
+  groupId: string;
+  deleted: boolean;
+};
+
 export type ChatMessage = {
   id: string;
   groupId: string;
@@ -100,4 +116,25 @@ export type SmsGatewayHealth = {
   lastPingAt?: string;
   lastAppStartedAt?: string;
   updatedAt: string;
+};
+
+export type PushSubscriptionRecord = {
+  id: string;
+  memberId: string;
+  endpoint: string;
+  p256dh: string;
+  auth: string;
+  expirationTime?: number;
+  failureCount: number;
+  lastSuccessAt?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type SecurityEvent = {
+  id: string;
+  eventType: string;
+  maskedPhone?: string;
+  details?: Record<string, unknown>;
+  createdAt: string;
 };

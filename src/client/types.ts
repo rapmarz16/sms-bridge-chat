@@ -45,6 +45,7 @@ export type Message = {
     size: number;
   }>;
   createdAt: string;
+  deletedAt?: string;
 };
 
 export type SmsUsage = {
@@ -60,6 +61,15 @@ export type Bootstrap = {
   members: Member[];
   messages: Message[];
   smsUsage: SmsUsage;
+  pushNotifications: {
+    enabled: boolean;
+    publicKey?: string;
+  };
+  imageUploads: {
+    enabled: boolean;
+    maxBytes: number;
+    acceptedTypes: string[];
+  };
 };
 
 export type SmsDelivery = {

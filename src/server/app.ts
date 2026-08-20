@@ -13,13 +13,16 @@ import { loadConfig } from "./config.js";
 import { SqliteStore } from "./db/store.js";
 import { ChatEventBus } from "./events.js";
 import { registerAdminRoutes } from "./http/routes-admin.js";
+import { registerAttachmentRoutes } from "./http/routes-attachments.js";
 import { registerAuthRoutes } from "./http/routes-auth.js";
 import { registerChatRoutes } from "./http/routes-chat.js";
+import { registerPushRoutes } from "./http/routes-push.js";
 import { registerWebhookRoutes } from "./http/routes-webhook.js";
 import { HttpError, SESSION_COOKIE } from "./http/guards.js";
 import { cleanErrorMessage } from "./security.js";
 import { AuthError, AuthService } from "./services/auth-service.js";
 import { ChatService } from "./services/chat-service.js";
+import { PushNotificationService, type PushTransport } from "./services/push-notification-service.js";
 import { SmsQueueWorker } from "./services/sms-queue.js";
 import { AndroidGatewayProvider } from "./sms/android-gateway.js";
 import { DisabledSmsProvider, type SmsProvider } from "./sms/provider.js";
@@ -31,6 +34,7 @@ export type BuildAppOptions = {
   provider?: SmsProvider;
   startWorker?: boolean;
   serveClient?: boolean;
+  pushTransport?: PushTransport;
 };
 
 export type BuiltApp = {
@@ -39,6 +43,7 @@ export type BuiltApp = {
   events: ChatEventBus;
   auth: AuthService;
   chat: ChatService;
+  push: PushNotificationService;
   worker: SmsQueueWorker;
 };
 
@@ -55,6 +60,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<BuiltApp>
   const events = new ChatEventBus();
   const auth = new AuthService(store, config, provider);
   const chat = new ChatService(store, config, events, provider.name);
+  const push = new PushNotificationService(store, config, options.pushTransport);
   const worker = new SmsQueueWorker(store, config, provider);
   chat.setQueueWakeHandler(worker.wake);
 
@@ -88,11 +94,14 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<BuiltApp>
   });
   await app.register(rateLimit, { global: true, max: 240, timeWindow: "1 minute" });
   await app.register(multipart, {
-    limits: { files: 1, fileSize: 5 * 1024 * 1024, fields: 5 }
+    limits: { files: 1, fileSize: config.imageUploadMaxBytes, fields: 5 },
+    throwFileSizeLimit: false
   });
 
   registerAuthRoutes(app, auth, config);
   registerChatRoutes(app, auth, chat, store, config);
+  registerAttachmentRoutes(app, auth, chat, store, config);
+  registerPushRoutes(app, auth, store, config);
   registerAdminRoutes(app, auth, store, config, worker);
   registerWebhookRoutes(app, chat, store, config);
 
@@ -105,6 +114,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<BuiltApp>
     return reply.code(database === "ok" ? 200 : 503).send({
       status: database === "ok" ? "ok" : "error",
       database,
+      webPush: { enabled: config.webPushEnabled },
       ...(config.smsProvider === "android_gateway" ? {
         smsGateway: {
           enabled: config.smsEnabled,
@@ -130,8 +140,14 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<BuiltApp>
   io.on("connection", (socket) => {
     socket.join(store.getDefaultGroup().id);
   });
-  events.on("message", (message) => io.to(message.groupId).emit("message:new", message));
+  events.on("message", (message) => {
+    io.to(message.groupId).emit("message:new", message);
+    void push.notifyMessage(message).then((result) => {
+      if (result.failed > 0) app.log.warn({ failed: result.failed }, "web push delivery failed");
+    }).catch(() => app.log.warn("web push notification processing failed"));
+  });
   events.on("reaction", (reaction) => io.to(store.getDefaultGroup().id).emit("reaction:added", reaction));
+  events.on("message:deleted", (event) => io.to(event.groupId).emit("message:deleted", event));
   events.on("reaction:removed", (event) => io.to(store.getDefaultGroup().id).emit("reaction:removed", event));
 
   const clientRoot = resolve(process.cwd(), "dist/client");
@@ -177,5 +193,5 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<BuiltApp>
   });
 
   if (options.startWorker !== false) worker.start();
-  return { app, store, events, auth, chat, worker };
+  return { app, store, events, auth, chat, push, worker };
 }

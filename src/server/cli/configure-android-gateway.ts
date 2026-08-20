@@ -23,6 +23,9 @@ const provider = new AndroidGatewayProvider(config);
 const health = await provider.getHealth();
 if (health.status === "fail") throw new Error("The Android gateway reports a failed health state; correct the phone before registering webhooks");
 
+await provider.configureWebhookSigningKey(config.androidGatewayWebhookSigningKey!);
+process.stdout.write("Configured the phone webhook signing key\n");
+
 const webhookUrl = `${config.appBaseUrl}/api/webhooks/android/${config.androidGatewayWebhookSecret}`;
 for (const event of ANDROID_GATEWAY_WEBHOOK_EVENTS) {
   const id = `sms-bridge-chat-${event.replace(/[^a-z]+/g, "-").replace(/^-|-$/g, "")}`;

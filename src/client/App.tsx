@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent, type KeyboardEvent } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeSanitize from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 import { io, type Socket } from "socket.io-client";
 import { api, ApiError } from "./api";
+import { disableWebPush, enableWebPush, supportsWebPush, syncWebPush, webPushIsEnabled, type PushConfiguration } from "./push";
 import type { Bootstrap, Member, Message, Reaction, SmsDelivery, SmsUsage } from "./types";
 
 const REACTIONS = ["👍", "❤️", "😂", "😮"] as const;
@@ -120,15 +121,18 @@ function MessageItem({
   currentMember,
   previous,
   onReply,
-  onReact
+  onReact,
+  onDelete
 }: {
   message: Message;
   currentMember: Member;
   previous?: Message;
   onReply: (message: Message) => void;
   onReact: (message: Message, emoji: string, remove: boolean) => void;
+  onDelete: (message: Message) => void;
 }) {
   const mine = message.senderMemberId === currentMember.id;
+  const canDelete = !message.deletedAt && (currentMember.role === "ADMIN" || (mine && message.source === "APP"));
   const continuation = Boolean(previous) && previous!.senderMemberId === message.senderMemberId &&
     new Date(message.createdAt).getTime() - new Date(previous!.createdAt).getTime() < 5 * 60_000;
   const grouped = useMemo(() => REACTIONS.map((emoji) => ({
@@ -148,28 +152,35 @@ function MessageItem({
           </div>
         )}
         <div className="bubble-wrap">
-          <div className="message-bubble">
+          <div className={`message-bubble ${message.deletedAt ? "deleted" : ""}`}>
             {message.replyTo && (
               <button className="reply-context" type="button" title="Original message">
                 <strong>{message.replyTo.senderName}</strong>
                 <span>{truncate(message.replyTo.body)}</span>
               </button>
             )}
-            <div className="message-body"><Markdown>{message.body}</Markdown></div>
-            {message.attachments.map((attachment) => <img key={attachment.id} className="message-image" src={attachment.url} alt={attachment.originalFilename} />)}
+            {(message.deletedAt || message.body) && <div className="message-body">{message.deletedAt ? <em>Message removed</em> : <Markdown>{message.body}</Markdown>}</div>}
+            {message.attachments.map((attachment) => (
+              <a key={attachment.id} className="message-image-link" href={attachment.url} target="_blank" rel="noreferrer" aria-label={`Open ${attachment.originalFilename}`}>
+                <img className="message-image" src={attachment.url} alt={attachment.originalFilename} loading="lazy" />
+              </a>
+            ))}
           </div>
-          <div className="message-actions">
-            <button type="button" onClick={() => onReply(message)} aria-label={`Reply to ${message.senderName}`}>↩</button>
-            <details>
-              <summary aria-label="Add a reaction">☺</summary>
-              <div className="reaction-menu">
-                {REACTIONS.map((emoji) => {
-                  const mineReaction = message.reactions.some((reaction) => reaction.emoji === emoji && reaction.memberId === currentMember.id);
-                  return <button type="button" key={emoji} className={mineReaction ? "selected" : ""} onClick={() => onReact(message, emoji, mineReaction)}>{emoji}</button>;
-                })}
-              </div>
-            </details>
-          </div>
+          {!message.deletedAt && (
+            <div className="message-actions">
+              <button type="button" onClick={() => onReply(message)} aria-label={`Reply to ${message.senderName}`}>↩</button>
+              <details>
+                <summary aria-label="Add a reaction">☺</summary>
+                <div className="reaction-menu">
+                  {REACTIONS.map((emoji) => {
+                    const mineReaction = message.reactions.some((reaction) => reaction.emoji === emoji && reaction.memberId === currentMember.id);
+                    return <button type="button" key={emoji} className={mineReaction ? "selected" : ""} onClick={() => onReact(message, emoji, mineReaction)}>{emoji}</button>;
+                  })}
+                </div>
+              </details>
+              {canDelete && <button type="button" className="delete-message" onClick={() => onDelete(message)} aria-label={`Delete message from ${message.senderName}`} title="Delete message">⌫</button>}
+            </div>
+          )}
         </div>
         {grouped.length > 0 && (
           <div className="reaction-row">
@@ -209,6 +220,13 @@ function MembersPanel({ members }: { members: Member[] }) {
 type AdminStatus = {
   usage: SmsUsage;
   failures: SmsDelivery[];
+  recentEvents: Array<{
+    id: string;
+    eventType: string;
+    maskedPhone?: string;
+    details?: Record<string, unknown>;
+    createdAt: string;
+  }>;
   bridge: { configured: boolean; enabled: boolean; provider: "voipms" | "android_gateway"; providerParametersVerified: boolean };
   gateway?: {
     status: "pass" | "warn" | "fail" | "stale" | "unknown";
@@ -224,6 +242,25 @@ type AdminStatus = {
     lastAppStartedAt?: string;
   };
 };
+
+function smsEventDescription(event: AdminStatus["recentEvents"][number]): string {
+  const labels: Record<string, string> = {
+    ANDROID_SMS_ACCEPTED: "Inbound SMS added to the chat",
+    ANDROID_SMS_DUPLICATE: "Duplicate inbound SMS safely ignored",
+    ANDROID_WEBHOOK_AUTH_FAILED: "Gateway callback signature rejected",
+    ANDROID_WEBHOOK_WRONG_DEVICE: "Callback ignored from an unexpected device",
+    ANDROID_WEBHOOK_WRONG_SIM: "Callback ignored from an unexpected SIM",
+    ANDROID_SMS_MISSING_SENDER: "Inbound SMS did not include a sender number",
+    ANDROID_CONFIGURED_SIM_MISSING: "Configured SIM was not found on the phone",
+    ANDROID_SIM_NUMBER_MISMATCH: "Gateway SIM phone number does not match configuration",
+    SMS_UNKNOWN_NUMBER: "Inbound SMS ignored because the sender is not an active member",
+    SMS_INVALID_SENDER: "Inbound SMS sender number could not be normalized",
+    SMS_INVALID_MESSAGE: "Inbound SMS was empty or exceeded the message limit",
+    SMS_BRIDGE_DISABLED: "Inbound SMS ignored because the bridge is paused",
+    WEBHOOK_WRONG_DID: "Inbound SMS targeted a different gateway number"
+  };
+  return `${labels[event.eventType] ?? event.eventType.replaceAll("_", " ").toLowerCase()}${event.maskedPhone ? ` · ${event.maskedPhone}` : ""}`;
+}
 
 function gatewaySummary(gateway: NonNullable<AdminStatus["gateway"]>): string {
   const details: string[] = [];
@@ -329,6 +366,17 @@ function AdminPanel({ bootstrap, onChanged }: { bootstrap: Bootstrap; onChanged:
           ))}
         </section>
       )}
+      {status && status.recentEvents.length > 0 && (
+        <section className="event-list">
+          <h4>Recent inbound diagnostics</h4>
+          {status.recentEvents.slice(0, 10).map((event) => (
+            <div key={event.id}>
+              <span>{smsEventDescription(event)}</span>
+              <time dateTime={event.createdAt}>{new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(event.createdAt))}</time>
+            </div>
+          ))}
+        </section>
+      )}
       {(adding || editing) && (
         <div className="inline-dialog">
           <form onSubmit={saveMember}>
@@ -347,22 +395,56 @@ function AdminPanel({ bootstrap, onChanged }: { bootstrap: Bootstrap; onChanged:
   );
 }
 
-function SettingsPanel({ member, onLogout }: { member: Member; onLogout: () => void }) {
-  const [notifications, setNotifications] = useState(() => localStorage.getItem("bridge-notifications") === "on");
-  async function toggleNotifications() {
-    if (!notifications && "Notification" in window) {
-      const permission = await Notification.requestPermission();
-      if (permission !== "granted") return;
+function SettingsPanel({ member, pushConfiguration, onLogout }: { member: Member; pushConfiguration: PushConfiguration; onLogout: () => void }) {
+  const [notifications, setNotifications] = useState(false);
+  const [checking, setChecking] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [notificationError, setNotificationError] = useState("");
+
+  useEffect(() => {
+    localStorage.removeItem("bridge-notifications");
+    if (!pushConfiguration.enabled || !supportsWebPush()) {
+      setChecking(false);
+      return;
     }
-    const next = !notifications;
-    setNotifications(next);
-    localStorage.setItem("bridge-notifications", next ? "on" : "off");
+    void webPushIsEnabled()
+      .then(setNotifications)
+      .catch(() => setNotifications(false))
+      .finally(() => setChecking(false));
+  }, [pushConfiguration.enabled]);
+
+  async function toggleNotifications() {
+    if (busy) return;
+    setBusy(true);
+    setNotificationError("");
+    try {
+      if (notifications) await disableWebPush();
+      else await enableWebPush(pushConfiguration);
+      setNotifications(!notifications);
+    } catch (reason) {
+      setNotificationError(reason instanceof Error ? reason.message : "Could not change notification settings");
+    } finally {
+      setBusy(false);
+    }
   }
+
+  const notificationDescription = !pushConfiguration.enabled
+    ? "The server administrator must configure Web Push first"
+    : !supportsWebPush()
+      ? "This browser does not support background notifications"
+      : notifications
+        ? "Alerts will appear when the chat is backgrounded or closed"
+        : "Show Android alerts when the chat is backgrounded or closed";
+
   return (
     <div className="panel-section settings-panel">
       <p className="eyebrow">Your account</p><h3>Settings</h3>
       <div className="profile-card"><div className="avatar large">{initials(member.displayName)}</div><div><strong>{member.displayName}</strong><span>{member.phoneNumberE164}</span></div></div>
-      <button className="setting-row" type="button" onClick={toggleNotifications}><div><strong>Message notifications</strong><span>Show an alert when the chat is in the background</span></div><i className={`switch ${notifications ? "on" : ""}`}><b /></i></button>
+      {notificationError && <ErrorBanner message={notificationError} onDismiss={() => setNotificationError("")} />}
+      <button className="setting-row" type="button" onClick={() => void toggleNotifications()} disabled={checking || busy || !pushConfiguration.enabled || !supportsWebPush()} aria-pressed={notifications}>
+        <div><strong>Background notifications</strong><span>{checking ? "Checking this device…" : notificationDescription}</span></div>
+        <i className={`switch ${notifications ? "on" : ""}`}><b /></i>
+      </button>
       <button className="danger-button" type="button" onClick={onLogout}>Log out</button>
     </div>
   );
@@ -376,24 +458,46 @@ function Chat({ bootstrap: initial, onUnauthenticated }: { bootstrap: Bootstrap;
   const [panel, setPanel] = useState<"members" | "admin" | "settings" | null>(null);
   const [error, setError] = useState("");
   const [sending, setSending] = useState(false);
+  const [photo, setPhoto] = useState<File>();
   const [loadingOlder, setLoadingOlder] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const photoInputRef = useRef<HTMLInputElement>(null);
   const socketRef = useRef<Socket | undefined>(undefined);
+  const photoPreview = useMemo(() => photo ? URL.createObjectURL(photo) : undefined, [photo]);
+
+  useEffect(() => () => {
+    if (photoPreview) URL.revokeObjectURL(photoPreview);
+  }, [photoPreview]);
 
   const refresh = useCallback(async () => {
     const next = await api<Bootstrap>("/api/bootstrap");
     setData(next);
+    setMessages((current) => {
+      const merged = new Map(current.map((message) => [message.id, message]));
+      for (const message of next.messages) merged.set(message.id, message);
+      return [...merged.values()].sort((left, right) => new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime());
+    });
   }, []);
+
+  useEffect(() => {
+    void syncWebPush(data.pushNotifications).catch(() => undefined);
+  }, [data.pushNotifications.enabled, data.pushNotifications.publicKey]);
+
+  useEffect(() => {
+    if (!("serviceWorker" in navigator)) return;
+    const receivePushMessage = (event: MessageEvent) => {
+      if (event.data?.type === "push:message") void refresh();
+    };
+    navigator.serviceWorker.addEventListener("message", receivePushMessage);
+    return () => navigator.serviceWorker.removeEventListener("message", receivePushMessage);
+  }, [refresh]);
 
   useEffect(() => {
     const socket = io({ path: "/socket.io", withCredentials: true });
     socketRef.current = socket;
     socket.on("message:new", (message: Message) => {
       setMessages((current) => current.some((item) => item.id === message.id) ? current : [...current, message]);
-      if (document.hidden && localStorage.getItem("bridge-notifications") === "on" && Notification.permission === "granted") {
-        new Notification(message.senderName, { body: truncate(message.body, 120), icon: "/icon-192.png" });
-      }
     });
     socket.on("reaction:added", (reaction: Reaction) => {
       setMessages((current) => current.map((message) => message.id === reaction.messageId
@@ -405,6 +509,13 @@ function Chat({ bootstrap: initial, onUnauthenticated }: { bootstrap: Bootstrap;
         ? { ...message, reactions: message.reactions.filter((item) => !(item.memberId === event.memberId && item.emoji === event.emoji)) }
         : message));
     });
+    socket.on("message:deleted", (event: { messageId: string; deletedAt: string }) => {
+      setMessages((current) => current.map((message) => {
+        if (message.id === event.messageId) return { ...message, body: "Message removed", deletedAt: event.deletedAt, reactions: [], attachments: [] };
+        if (message.replyTo?.id === event.messageId) return { ...message, replyTo: { ...message.replyTo, body: "Message removed" } };
+        return message;
+      }));
+    });
     return () => { socket.close(); };
   }, []);
 
@@ -415,19 +526,45 @@ function Chat({ bootstrap: initial, onUnauthenticated }: { bootstrap: Bootstrap;
 
   async function sendMessage() {
     const body = composer.trim();
-    if (!body || sending) return;
+    if ((!body && !photo) || sending) return;
     setSending(true); setError("");
     try {
-      const result = await api<{ message: Message }>("/api/messages", {
-        method: "POST",
-        body: JSON.stringify({ body, replyToMessageId: replyingTo?.id })
-      });
+      let result: { message: Message };
+      if (photo) {
+        const form = new FormData();
+        form.append("body", body);
+        if (replyingTo) form.append("replyToMessageId", replyingTo.id);
+        form.append("image", photo, photo.name);
+        result = await api<{ message: Message }>("/api/messages/images", { method: "POST", body: form });
+      } else {
+        result = await api<{ message: Message }>("/api/messages", {
+          method: "POST",
+          body: JSON.stringify({ body, replyToMessageId: replyingTo?.id })
+        });
+      }
       setMessages((current) => current.some((item) => item.id === result.message.id) ? current : [...current, result.message]);
-      setComposer(""); setReplyingTo(undefined);
+      setComposer(""); setPhoto(undefined); setReplyingTo(undefined);
+      if (photoInputRef.current) photoInputRef.current.value = "";
     } catch (reason) {
       if (reason instanceof ApiError && reason.status === 401) return onUnauthenticated();
       setError(reason instanceof Error ? reason.message : "Could not send message");
     } finally { setSending(false); }
+  }
+
+  function choosePhoto(event: ChangeEvent<HTMLInputElement>) {
+    const selected = event.target.files?.[0];
+    event.target.value = "";
+    if (!selected) return;
+    if (!data.imageUploads.acceptedTypes.includes(selected.type.toLowerCase())) {
+      setError("Choose a JPEG, PNG, WebP, or AVIF photo");
+      return;
+    }
+    if (selected.size > data.imageUploads.maxBytes) {
+      setError(`Photo must be ${Math.floor(data.imageUploads.maxBytes / 1024 / 1024)} MB or smaller`);
+      return;
+    }
+    setError("");
+    setPhoto(selected);
   }
 
   function composerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
@@ -453,6 +590,23 @@ function Chat({ bootstrap: initial, onUnauthenticated }: { bootstrap: Bootstrap;
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not update reaction"); }
   }
 
+  async function deleteMessage(message: Message) {
+    const warning = message.source === "SMS" || data.group.smsEnabled
+      ? "Remove this message from the app? Any SMS copies already sent cannot be recalled."
+      : "Remove this message from the chat?";
+    if (!window.confirm(warning)) return;
+    try {
+      const result = await api<{ message: Message }>(`/api/messages/${message.id}`, { method: "DELETE" });
+      setMessages((current) => current.map((item) => {
+        if (item.id === result.message.id) return result.message;
+        if (item.replyTo?.id === result.message.id) return { ...item, replyTo: { ...item.replyTo, body: "Message removed" } };
+        return item;
+      }));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not delete message");
+    }
+  }
+
   async function loadOlder() {
     const first = messages[0];
     if (!first) return;
@@ -464,7 +618,10 @@ function Chat({ bootstrap: initial, onUnauthenticated }: { bootstrap: Bootstrap;
   }
 
   async function logout() {
-    try { await api("/api/auth/logout", { method: "POST" }); } finally { onUnauthenticated(); }
+    try {
+      await disableWebPush().catch(() => undefined);
+      await api("/api/auth/logout", { method: "POST" });
+    } finally { onUnauthenticated(); }
   }
 
   let lastDay = "";
@@ -483,11 +640,18 @@ function Chat({ bootstrap: initial, onUnauthenticated }: { bootstrap: Bootstrap;
           const day = dayLabel(message.createdAt);
           const showDay = day !== lastDay;
           lastDay = day;
-          return <div key={message.id}>{showDay && <div className="day-divider"><span>{day}</span></div>}<MessageItem message={message} previous={messages[index - 1]} currentMember={data.currentMember} onReply={(item) => { setReplyingTo(item); textareaRef.current?.focus(); }} onReact={(item, emoji, remove) => void react(item, emoji, remove)} /></div>;
+          return <div key={message.id}>{showDay && <div className="day-divider"><span>{day}</span></div>}<MessageItem message={message} previous={messages[index - 1]} currentMember={data.currentMember} onReply={(item) => { setReplyingTo(item); textareaRef.current?.focus(); }} onReact={(item, emoji, remove) => void react(item, emoji, remove)} onDelete={(item) => void deleteMessage(item)} /></div>;
         })}
       </div>
       <footer className="composer-area">
-        {replyingTo && <div className="composer-reply"><div><strong>Replying to {replyingTo.senderName}</strong><span>{truncate(replyingTo.body, 120)}</span></div><button type="button" onClick={() => setReplyingTo(undefined)}>×</button></div>}
+        {replyingTo && <div className="composer-reply"><div><strong>Replying to {replyingTo.senderName}</strong><span>{truncate(replyingTo.body || "Photo", 120)}</span></div><button type="button" onClick={() => setReplyingTo(undefined)}>×</button></div>}
+        {photo && photoPreview && (
+          <div className="photo-preview">
+            <img src={photoPreview} alt="Selected attachment preview" />
+            <div><strong>{photo.name}</strong><span>{(photo.size / 1024 / 1024).toFixed(1)} MB · converted privately to WebP</span></div>
+            <button type="button" onClick={() => setPhoto(undefined)} aria-label="Remove selected photo">×</button>
+          </div>
+        )}
         <div className="format-bar" aria-label="Message formatting">
           <button type="button" onClick={() => wrapSelection("**")} title="Bold"><b>B</b></button>
           <button type="button" onClick={() => wrapSelection("_")} title="Italic"><i>I</i></button>
@@ -495,11 +659,12 @@ function Chat({ bootstrap: initial, onUnauthenticated }: { bootstrap: Bootstrap;
           <button type="button" onClick={() => setComposer((current) => `${current}${current && !current.endsWith("\n") ? "\n" : ""}- `)} title="List">≡</button>
           <button type="button" onClick={() => setComposer((current) => `${current}👍`)} title="Emoji">☺</button>
           <span className="format-spacer" />
-          <button type="button" className="attachment-button" disabled title="Images unlock after live SMS validation">＋</button>
+          <input ref={photoInputRef} className="visually-hidden" type="file" accept={data.imageUploads.acceptedTypes.join(",")} onChange={choosePhoto} />
+          <button type="button" className="attachment-button" disabled={!data.imageUploads.enabled || sending} onClick={() => photoInputRef.current?.click()} title="Attach a photo" aria-label="Attach a photo">＋</button>
         </div>
         <div className="composer-row">
           <textarea ref={textareaRef} value={composer} onChange={(event) => setComposer(event.target.value)} onKeyDown={composerKeyDown} placeholder={`Message ${data.group.name}`} rows={1} maxLength={4000} aria-label="Message" />
-          <button className="send-button" type="button" onClick={() => void sendMessage()} disabled={!composer.trim() || sending} aria-label="Send message">➤</button>
+          <button className="send-button" type="button" onClick={() => void sendMessage()} disabled={(!composer.trim() && !photo) || sending} aria-label="Send message">➤</button>
         </div>
         <span className="composer-hint">Enter to send · Shift + Enter for a new line</span>
       </footer>
@@ -509,7 +674,7 @@ function Chat({ bootstrap: initial, onUnauthenticated }: { bootstrap: Bootstrap;
             <header><div className="panel-tabs"><button className={panel === "members" ? "active" : ""} onClick={() => setPanel("members")}>Members</button>{data.currentMember.role === "ADMIN" && <button className={panel === "admin" ? "active" : ""} onClick={() => setPanel("admin")}>Admin</button>}<button className={panel === "settings" ? "active" : ""} onClick={() => setPanel("settings")}>Settings</button></div><button className="panel-close" type="button" onClick={() => setPanel(null)}>×</button></header>
             {panel === "members" && <MembersPanel members={data.members} />}
             {panel === "admin" && data.currentMember.role === "ADMIN" && <AdminPanel bootstrap={data} onChanged={refresh} />}
-            {panel === "settings" && <SettingsPanel member={data.currentMember} onLogout={() => void logout()} />}
+            {panel === "settings" && <SettingsPanel member={data.currentMember} pushConfiguration={data.pushNotifications} onLogout={() => void logout()} />}
           </aside>
         </div>
       )}

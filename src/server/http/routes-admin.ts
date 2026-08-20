@@ -95,6 +95,7 @@ export function registerAdminRoutes(
         percentage: Math.round((used / config.smsDailyLimit) * 100)
       },
       failures: store.listDeliveryFailures(),
+      recentEvents: store.listRecentSmsEvents(),
       bridge: {
         configured: config.smsEnabled,
         enabled: store.getDefaultGroup().smsEnabled,

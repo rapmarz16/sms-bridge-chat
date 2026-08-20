@@ -170,6 +170,26 @@ const migrations: Migration[] = [
         updated_at INTEGER NOT NULL
       );
     `
+  },
+  {
+    version: 4,
+    name: "web_push_subscriptions",
+    sql: `
+      CREATE TABLE push_subscriptions (
+        id TEXT PRIMARY KEY,
+        member_id TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+        endpoint TEXT NOT NULL UNIQUE,
+        p256dh TEXT NOT NULL,
+        auth TEXT NOT NULL,
+        expiration_time INTEGER,
+        failure_count INTEGER NOT NULL DEFAULT 0,
+        last_success_at INTEGER,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX push_subscriptions_member_idx
+        ON push_subscriptions(member_id);
+    `
   }
 ];
 

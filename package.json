@@ -4,7 +4,9 @@
   "private": true,
   "description": "A private, self-hosted group chat where SMS is an alternate client.",
   "type": "module",
-  "engines": { "node": ">=22.13.0" },
+  "engines": {
+    "node": ">=22.13.0"
+  },
   "scripts": {
     "dev": "concurrently -k -n server,web -c blue,green \"npm:dev:server\" \"npm:dev:web\"",
     "dev:server": "tsx watch src/server/index.ts",
@@ -22,6 +24,8 @@
     "create-admin:dev": "tsx src/server/cli/create-admin.ts",
     "configure-android-gateway": "node dist/server/cli/configure-android-gateway.js",
     "configure-android-gateway:dev": "tsx src/server/cli/configure-android-gateway.ts",
+    "generate-vapid-keys": "node dist/server/cli/generate-vapid-keys.js",
+    "generate-vapid-keys:dev": "tsx src/server/cli/generate-vapid-keys.ts",
     "db:migrate": "node dist/server/cli/migrate.js",
     "db:migrate:dev": "tsx src/server/cli/migrate.ts"
   },
@@ -40,8 +44,10 @@
     "react-markdown": "^10.1.0",
     "rehype-sanitize": "^6.0.0",
     "remark-gfm": "^4.0.1",
+    "sharp": "^0.35.3",
     "socket.io": "^4.8.1",
     "socket.io-client": "^4.8.1",
+    "web-push": "^3.6.7",
     "zod": "^4.1.5"
   },
   "devDependencies": {
@@ -49,9 +55,9 @@
     "@types/node": "^22.18.0",
     "@types/react": "^19.1.12",
     "@types/react-dom": "^19.1.9",
+    "@types/web-push": "^3.6.4",
     "@vitejs/plugin-react": "^5.0.2",
     "concurrently": "^9.2.1",
-    "sharp": "^0.34.3",
     "tsx": "^4.20.5",
     "typescript": "^5.9.2",
     "vite": "^7.1.3",

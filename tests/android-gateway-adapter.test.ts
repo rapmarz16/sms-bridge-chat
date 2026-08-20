@@ -88,6 +88,25 @@ describe("Android gateway adapter isolation", () => {
     expect(String(fetchMock.mock.calls[1]?.[0])).toBe("http://192.168.50.25:8080/message/delivery-recovered");
   });
 
+  it("configures the write-only webhook signing key without exposing it in the URL", async () => {
+    let capturedUrl = "";
+    let capturedInit: RequestInit | undefined;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      capturedUrl = String(input);
+      capturedInit = init;
+      return new Response(null, { status: 204 });
+    }));
+
+    await new AndroidGatewayProvider(config()).configureWebhookSigningKey("new-signing-key-that-remains-secret");
+
+    expect(capturedUrl).toBe("http://192.168.50.25:8080/settings");
+    expect(capturedUrl).not.toContain("new-signing-key");
+    expect(capturedInit?.method).toBe("PATCH");
+    expect(JSON.parse(String(capturedInit?.body))).toEqual({
+      webhooks: { signing_key: "new-signing-key-that-remains-secret" }
+    });
+  });
+
   it("does not retry a permanent validation rejection indefinitely", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: "Invalid destination" }), {
       status: 400,
