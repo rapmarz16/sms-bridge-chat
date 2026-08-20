@@ -76,10 +76,28 @@ export type SmsDelivery = {
   phoneNumber: string;
   provider: string;
   providerMessageId?: string;
+  providerStatus?: string;
+  providerPartsCount?: number;
   status: SmsDeliveryStatus;
   attempts: number;
   lastError?: string;
   nextAttemptAt?: string;
   createdAt: string;
+  updatedAt: string;
+};
+
+export type SmsGatewayHealth = {
+  provider: string;
+  deviceId: string;
+  status: "pass" | "warn" | "fail" | "unknown";
+  version?: string;
+  batteryLevel?: number;
+  charging?: boolean;
+  connectionAvailable?: boolean;
+  cellularType?: number;
+  carrierName?: string;
+  lastEventAt: string;
+  lastPingAt?: string;
+  lastAppStartedAt?: string;
   updatedAt: string;
 };

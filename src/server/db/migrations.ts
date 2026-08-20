@@ -143,6 +143,33 @@ const migrations: Migration[] = [
         ON groups(sms_did)
         WHERE sms_did IS NOT NULL;
     `
+  },
+  {
+    version: 3,
+    name: "android_gateway_status_and_health",
+    sql: `
+      ALTER TABLE sms_deliveries ADD COLUMN provider_status TEXT;
+      ALTER TABLE sms_deliveries ADD COLUMN provider_parts_count INTEGER;
+      ALTER TABLE sms_deliveries ADD COLUMN provider_status_updated_at INTEGER;
+      CREATE INDEX sms_deliveries_provider_message_idx
+        ON sms_deliveries(provider, provider_message_id);
+
+      CREATE TABLE sms_gateway_health (
+        provider TEXT PRIMARY KEY,
+        device_id TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('pass', 'warn', 'fail', 'unknown')),
+        version TEXT,
+        battery_level REAL,
+        charging INTEGER CHECK (charging IS NULL OR charging IN (0, 1)),
+        connection_available INTEGER CHECK (connection_available IS NULL OR connection_available IN (0, 1)),
+        cellular_type INTEGER,
+        carrier_name TEXT,
+        last_event_at INTEGER NOT NULL,
+        last_ping_at INTEGER,
+        last_app_started_at INTEGER,
+        updated_at INTEGER NOT NULL
+      );
+    `
   }
 ];
 

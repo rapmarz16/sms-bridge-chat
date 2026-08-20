@@ -2,7 +2,7 @@
 
 A private, self-hosted group chat where installing an app is optional. The application database is the canonical conversation; the PWA and ordinary SMS are two clients of that same conversation.
 
-> Current build status: the complete text MVP is implemented and covered by 25 automated tests. The remaining production gate is owner-supplied VoIP.ms configuration plus real Canadian/U.S. phone validation. Images/MMS remain deliberately deferred.
+> Current build status: the complete text MVP is implemented and covered by 34 automated tests. It can use either VoIP.ms or a dedicated Android phone/SIM. The remaining production gates are installing the phone, obtaining carrier approval for the expected automated volume, and validating real Canadian/U.S. delivery. Images/MMS remain deliberately deferred.
 
 ## What is implemented
 
@@ -14,22 +14,27 @@ A private, self-hosted group chat where installing an app is optional. The appli
 - Socket.IO realtime events; the database remains authoritative after reconnects
 - Administrator member management, bridge kill switch, usage display, and delivery failures
 - Persistent per-recipient SMS delivery rows and provider attempt accounting
-- Provider-neutral `SmsProvider` interface with an isolated VoIP.ms adapter
-- Idempotent VoIP.ms callback route and unknown-number allow-list behavior
+- Provider-neutral `SmsProvider` interface with isolated VoIP.ms and Android/SIM adapters
+- HMAC-signed Android webhooks for inbound SMS, status, and phone health
+- Idempotent provider callbacks and unknown-number allow-list behavior
 - Docker/Compose packaging, Unraid-friendly ownership, mounted data, and `/health`
 
 Images/MMS remain intentionally gated until the text bridge has been proven with real Canadian and U.S. phones, as required by the product plan.
 
 ## Architecture
 
-```text
-React PWA ── HTTPS / Socket.IO ─┐
-                               ├── Fastify application ── SQLite /data/chat.db
-VoIP.ms callback ── HTTPS ──────┘           │
-                                            └── persistent delivery worker ── VoIP.ms API
+```mermaid
+flowchart TD
+    PWA["React PWA"] -->|"HTTPS / Socket.IO"| App["Fastify application"]
+    Webhook["Provider webhook"] -->|HTTPS| App
+    App --> DB["SQLite /data/chat.db"]
+    App --> Worker["Persistent delivery worker"]
+    Worker --> VoIP["VoIP.ms REST API"]
+    Worker --> Phone["Android phone LAN API"]
+    Phone --> SIM["SIM / carrier"]
 ```
 
-The `SqliteStore` is the only persistence boundary. Chat services do not depend on VoIP.ms-specific request fields, and provider details are confined to `src/server/sms/voipms.ts`.
+The `SqliteStore` is the only persistence boundary. Chat services do not depend on provider-specific request fields. VoIP.ms details are confined to `src/server/sms/voipms.ts`; Android API and webhook schemas are confined to `src/server/sms/android-gateway.ts`.
 
 ## Quick start for development
 
@@ -93,6 +98,117 @@ node dist/server/cli/create-admin.js --name "Name" --phone "+14165551234"
 
 It creates the first member, adds the member to the default group, grants administrator access, and uses `BOTH` delivery mode. Running it again for the same normalized phone number safely restores that member as an active administrator.
 
+## Android phone and physical SIM setup
+
+The SIM is not mounted into Docker. The Android phone is an always-on network appliance: the container submits outbound jobs to the phone's private LAN API, while the phone sends signed HTTPS callbacks to this application for inbound SMS, delivery status, startup, and health events. USB is needed only for power.
+
+The integration uses the Apache-2.0 [SMS Gateway for Android](https://github.com/capcom6/android-sms-gateway) project in Local Server mode. Use the project's [current installation guide](https://docs.sms-gate.app/installation/) and secure release APK as the source of truth.
+
+### 1. Prepare the SIM and phone
+
+1. Use a carrier-supported LTE/VoLTE Android phone that still receives security updates. Confirm its IMEI/model is accepted by the selected carrier.
+2. Activate the SIM and manually test ordinary SMS in both directions with one Canadian and one U.S. phone. Confirm the plan includes Canada-to-U.S. SMS, not only domestic texting.
+3. In Google Messages, open Profile → Messages settings → RCS chats and turn RCS off for the gateway number. The bridge receives SMS/MMS events, not RCS conversations.
+4. If the number was previously attached to an iPhone, deregister it from iMessage before moving it to Android.
+5. Disable the SIM PIN so an unattended reboot can reconnect to the cellular network.
+6. Give the phone stable Wi-Fi and reserve its address in DHCP. If the router uses the Wi-Fi MAC for reservations, disable the randomized MAC for this SSID or reserve the displayed per-network MAC.
+7. Keep the phone on a reliable charger, preferably backed by the same UPS as Unraid. Enable the manufacturer's 80–85% battery-protection limit, keep the phone cool, and remove it from any sleeping/deep-sleeping app list.
+8. Set the SMS Gateway app's battery usage to Unrestricted/Not optimized, allow background operation, and retain its foreground-service notification.
+
+### 2. Configure SMS Gateway for Android
+
+1. Install the secure release APK and grant `SEND_SMS`, `RECEIVE_SMS`, and `READ_PHONE_STATE`. `READ_SMS` is optional and is not needed for live bridging.
+2. On the Home tab, note the displayed **Device ID**.
+3. Enable **Local Server**, tap **Offline** so it becomes **Online**, and note:
+   - the phone's local IP and port `8080`
+   - Local Server username
+   - Local Server password
+4. Open Settings → Webhooks → Signing Key. Set a unique random key of at least 32 characters and store the same value as `ANDROID_GATEWAY_WEBHOOK_SIGNING_KEY` in Unraid.
+5. Open Settings → Ping and enable a 60-second interval. The app uses these signed `system:ping` events for battery, network, version, and stale-phone warnings.
+6. Open Settings → Messages:
+   - choose **FIFO** processing so queued chat messages retain conversation order
+   - use normal priority; the bridge intentionally submits priority `0` so phone-side pacing remains active
+   - start with a modest random delay such as 2–4 seconds between sends
+   - set minute/hour/day limits no higher than the volume explicitly permitted by the carrier
+   - leave working hours disabled for an always-available family chat
+7. Confirm the gateway returns to Online after a phone reboot. Do not assume this until it has been tested on the selected phone/OEM firmware.
+
+The phone's Local Server Swagger page is available only on the LAN at `http://PHONE-IP:8080/docs`. Never port-forward port `8080` to the internet.
+
+### 3. Configure Unraid environment values
+
+On the first Android configuration boot, keep `SMS_ENABLED=false` while filling every value:
+
+```dotenv
+SMS_PROVIDER=android_gateway
+SMS_ENABLED=false
+SMS_DAILY_LIMIT=100
+
+ANDROID_GATEWAY_URL=http://192.168.50.25:8080
+ANDROID_GATEWAY_USERNAME=copy-from-phone
+ANDROID_GATEWAY_PASSWORD=copy-from-phone
+ANDROID_GATEWAY_PHONE_NUMBER=+14165551234
+ANDROID_GATEWAY_DEVICE_ID=copy-from-phone-home-tab
+ANDROID_GATEWAY_WEBHOOK_SECRET=generate-a-separate-long-random-value
+ANDROID_GATEWAY_WEBHOOK_SIGNING_KEY=exactly-match-the-phone-signing-key
+ANDROID_GATEWAY_SIM_NUMBER=1
+ANDROID_GATEWAY_TTL_SECONDS=3600
+ANDROID_GATEWAY_DELIVERY_REPORTS=true
+ANDROID_GATEWAY_WEBHOOK_MAX_SKEW_SECONDS=300
+ANDROID_GATEWAY_HEALTH_STALE_SECONDS=180
+```
+
+`APP_BASE_URL` must already be the application's externally valid HTTPS origin. The phone calls:
+
+```text
+https://chat.example.com/api/webhooks/android/ANDROID_GATEWAY_WEBHOOK_SECRET
+```
+
+If the phone cannot reach that public hostname from the home network, configure split DNS so the hostname resolves to the reverse proxy's LAN address. Do not replace it with a private HTTP URL: the secure gateway build requires HTTPS for non-loopback webhooks.
+
+### 4. Register callbacks from inside the container
+
+Restart the container so it receives the new environment values, then run:
+
+```bash
+docker compose exec sms-bridge-chat node dist/server/cli/configure-android-gateway.js
+```
+
+On Unraid's Docker console, the equivalent command is:
+
+```bash
+node dist/server/cli/configure-android-gateway.js
+```
+
+The command first checks the phone's `/health` endpoint, then safely replaces only the deterministic `sms-bridge-chat-*` registrations for `sms:received`, `sms:sent`, `sms:delivered`, `sms:failed`, `sms:cancelled`, `system:ping`, and `app:started`. It never prints the phone credentials or webhook URL secret.
+
+After registration, restart the gateway app once and confirm the Admin screen shows the carrier/check-in rather than `stale`. Then change `SMS_ENABLED=true` and restart the container.
+
+### 5. Network rules
+
+No USB device mapping, privileged Docker mode, or host networking is required. A normal Docker bridge can route to a separate LAN device.
+
+- Allow the SMS Bridge container/Unraid IP to reach the phone on TCP `8080`.
+- Allow the phone to reach the HTTPS reverse proxy on TCP `443`.
+- Prefer an IoT VLAN that denies the phone access to the rest of the LAN.
+- Never expose TCP `8080` through router port forwarding, a public tunnel, or the reverse proxy.
+- Keep the Local Server username/password, webhook URL secret, and HMAC signing key only in the protected deployment environment.
+
+### 6. Activation test
+
+1. Send one PWA message to one Canadian SMS member.
+2. Reply to the SIM number and confirm the reply appears once in the PWA under the correct member.
+3. Add a second SMS member and confirm fan-out occurs without echoing back to the sender.
+4. Test one U.S. recipient in each direction.
+5. Test a long message and an emoji; these can consume multiple carrier SMS segments.
+6. Turn off cellular service, send a PWA message, and confirm canonical chat remains available and the delivery failure is visible.
+7. Re-enable service and use the administrator Retry action.
+8. Reboot the phone, router, and container and confirm phone health and message flow recover.
+
+Begin with `SMS_DAILY_LIMIT=100` and increase it only after observing real usage and receiving carrier approval. At 100 group messages/day, 10–12 SMS recipients can create roughly 900–1,200 outbound deliveries/day before multipart expansion.
+
+Consumer “unlimited” does not necessarily authorize an automated gateway. The SMS Gateway project itself cautions against batch sending because of operator restrictions. For example, [Freedom Mobile's Fair Usage Policy](https://www.freedommobile.ca/docs/default-source/default-document-library/data-fair-usage-policy.pdf) permits action when unlimited messaging grossly exceeds typical consumer use. Obtain written confirmation for the intended private relay and Canada/U.S. traffic before treating a low-cost consumer SIM as production-safe.
+
 ## VoIP.ms callback route
 
 The inbound route is:
@@ -138,12 +254,12 @@ Use the current [VoIP.ms SMS/MMS instructions](https://wiki.voip.ms/article/SMS-
 
 Do not send credentials through chat or commit them. Put them directly in the deployment's protected `.env`/secret configuration.
 
-## Reverse proxy and query-string privacy
+## Reverse proxy and webhook privacy
 
-VoIP.ms's standard callback puts private message text in a GET query. The application disables automatic request logging and only records route templates, never full URLs. The reverse proxy must follow the same rule. For Nginx, use a dedicated callback location with access logging disabled, while retaining normal logs elsewhere:
+VoIP.ms's standard callback puts private message text in a GET query. The Android callback puts the webhook secret in the URL path and the message in a signed JSON body. The application disables automatic request logging and only records route templates, never full URLs or bodies. The reverse proxy must follow the same rule. For Nginx, disable access logging for all provider callbacks while retaining normal logs elsewhere:
 
 ```nginx
-location ^~ /api/webhooks/voipms/ {
+location ^~ /api/webhooks/ {
     access_log off;
     proxy_pass http://127.0.0.1:3000;
     proxy_set_header Host $host;
@@ -167,7 +283,7 @@ location / {
 }
 ```
 
-In Nginx Proxy Manager, create a custom location for `/api/webhooks/voipms/` and add `access_log off;` to that location rather than adding a second nested `location` block to a generated server. Check upstream CDN/tunnel logging too. The secret itself is part of the path, so this route should not appear in access logs at all.
+In Nginx Proxy Manager, create a custom location for `/api/webhooks/` and add `access_log off;` to that location rather than adding a second nested `location` block to a generated server. Check upstream CDN/tunnel logging too. Each provider secret is part of the path, so these routes should not appear in access logs at all. Do not enable request-body logging on the Android callback route.
 
 Keep `TRUST_PROXY=false` if the app port is directly reachable. When only a reverse proxy can reach it, set `TRUST_PROXY` to that proxy's exact IP/CIDR so forwarded client addresses can be used safely for rate limiting. Avoid a blanket `true` unless the entire network path is controlled.
 
@@ -189,7 +305,9 @@ Do not enable images/MMS until this text matrix passes.
 ## Safety defaults
 
 - `SMS_ENABLED=false` prevents accidental provider traffic.
-- `VOIPMS_SENDSMS_PARAMS_VERIFIED=false` independently blocks sends until the owner compares `did`, `dst`, and `message` with the current account-portal `sendSMS` method reference.
+- `SMS_PROVIDER` selects exactly one bridge; the unused provider's credentials are ignored.
+- When `SMS_PROVIDER=voipms`, `VOIPMS_SENDSMS_PARAMS_VERIFIED=false` independently blocks sends until the owner compares `did`, `dst`, and `message` with the current account-portal `sendSMS` method reference.
+- The Android adapter supplies a stable delivery UUID as the gateway message ID and checks that ID after an ambiguous HTTP failure before allowing a retry.
 - Every outbound provider call, including an OTP, consumes one daily-limit unit.
 - At 100%, canonical messages continue but SMS deliveries become `SKIPPED_LIMIT`.
 - A delivery that was already `SENDING` during an unclean restart is marked failed with an uncertain-provider-state message instead of being silently resent and potentially duplicated.
@@ -207,12 +325,14 @@ Do not enable images/MMS until this text matrix passes.
 | `npm run db:migrate:dev` | Apply local database migrations |
 | `npm run create-admin:dev -- --name ... --phone ...` | Bootstrap an administrator locally |
 | `npm run create-admin -- --name ... --phone ...` | Bootstrap an administrator after production build |
+| `npm run configure-android-gateway:dev` | Check the phone and register signed callbacks during development |
+| `npm run configure-android-gateway` | Check the phone and register signed callbacks after production build |
 
 The GitHub CI workflow repeats tests, the production build, and a real `docker build`. A separate manual/tag workflow publishes an `linux/amd64` image to `ghcr.io/<owner>/sms-bridge-chat` without embedding `.env` values.
 
 ## Automated coverage
 
-`npm test` currently runs 25 tests covering:
+`npm test` currently runs 34 tests covering:
 
 - OTP sessions, CSRF, member administration, persistence, and authenticated Socket.IO delivery
 - Known/unknown inbound numbers, wrong DID, bad secret, duplicate provider IDs, and bridge shutdown
@@ -221,6 +341,8 @@ The GitHub CI workflow repeats tests, the production build, and a real `docker b
 - Daily-limit enforcement and warning thresholds while canonical chat continues
 - Markdown-to-SMS degradation, full-link preservation, reply quoting, and reaction suppression
 - Isolated VoIP.ms request mapping and the mandatory owner-verification gate
+- Android Local Server request mapping, Basic authentication, stable gateway IDs, and ambiguous-request recovery
+- HMAC validation, stale/replayed callback rejection, inbound idempotency, delivery statuses, and gateway health events
 
 ## Environment
 

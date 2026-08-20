@@ -64,7 +64,7 @@ describe("milestone 5 rich messaging", () => {
       groupId: group.id, displayName: "Sarah", phoneNumberE164: "+14165550313", role: "MEMBER", deliveryMode: "SMS"
     });
     const question = context.built.chat.receiveSms({
-      to: "+14165550100", from: david.phoneNumberE164!, message: "Are we starting at 7?", providerMessageId: "reply-source"
+      provider: "voipms", to: "+14165550100", from: david.phoneNumberE164!, message: "Are we starting at 7?", providerMessageId: "reply-source"
     }).message!;
     await context.built.worker.drainOnce();
     context.provider.sent.splice(0);

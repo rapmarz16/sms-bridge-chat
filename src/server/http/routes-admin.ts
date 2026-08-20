@@ -84,6 +84,10 @@ export function registerAdminRoutes(
   app.get("/api/admin/sms", async (request) => {
     requireAdmin(request, auth);
     const used = store.getSmsUsage(localDayKey(Date.now(), config.timezone));
+    const gatewayHealth = config.smsProvider === "android_gateway" ? store.getGatewayHealth("android_gateway") : undefined;
+    const gatewayStale = gatewayHealth
+      ? Date.now() - new Date(gatewayHealth.lastEventAt).getTime() > config.androidGatewayHealthStaleSeconds * 1000
+      : true;
     return {
       usage: {
         used,
@@ -94,8 +98,22 @@ export function registerAdminRoutes(
       bridge: {
         configured: config.smsEnabled,
         enabled: store.getDefaultGroup().smsEnabled,
-        providerParametersVerified: config.voipmsSendSmsParamsVerified
-      }
+        provider: config.smsProvider,
+        providerParametersVerified: config.smsProvider === "android_gateway" || config.voipmsSendSmsParamsVerified
+      },
+      gateway: config.smsProvider === "android_gateway" ? {
+        status: gatewayStale ? "stale" : gatewayHealth?.status ?? "unknown",
+        stale: gatewayStale,
+        version: gatewayHealth?.version,
+        batteryLevel: gatewayHealth?.batteryLevel,
+        charging: gatewayHealth?.charging,
+        connectionAvailable: gatewayHealth?.connectionAvailable,
+        cellularType: gatewayHealth?.cellularType,
+        carrierName: gatewayHealth?.carrierName,
+        lastSeenAt: gatewayHealth?.lastEventAt,
+        lastPingAt: gatewayHealth?.lastPingAt,
+        lastAppStartedAt: gatewayHealth?.lastAppStartedAt
+      } : undefined
     };
   });
 
@@ -103,7 +121,7 @@ export function registerAdminRoutes(
     requireAdmin(request, auth);
     requireCsrf(request, config);
     const { deliveryId } = z.object({ deliveryId: z.string().uuid() }).parse(request.params);
-    if (!store.retryDelivery(deliveryId)) throw new HttpError("Delivery cannot be retried", 409, "NOT_RETRYABLE");
+    if (!store.retryDelivery(deliveryId, config.smsProvider)) throw new HttpError("Delivery cannot be retried", 409, "NOT_RETRYABLE");
     worker.wake();
     return reply.code(202).send({ queued: true });
   });

@@ -42,6 +42,7 @@ export class ChatService {
   }
 
   receiveSms(input: {
+    provider: string;
     to: string;
     from: string;
     message: string;
@@ -80,7 +81,7 @@ export class ChatService {
       senderMemberId: member.id,
       source: "SMS",
       body,
-      externalProvider: "voipms",
+      externalProvider: input.provider,
       externalProviderId: input.providerMessageId,
       smsProviderName: this.smsProviderName,
       fanoutEnabled: this.config.smsEnabled,

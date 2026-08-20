@@ -20,6 +20,8 @@
     "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.client.json --noEmit",
     "create-admin": "node dist/server/cli/create-admin.js",
     "create-admin:dev": "tsx src/server/cli/create-admin.ts",
+    "configure-android-gateway": "node dist/server/cli/configure-android-gateway.js",
+    "configure-android-gateway:dev": "tsx src/server/cli/configure-android-gateway.ts",
     "db:migrate": "node dist/server/cli/migrate.js",
     "db:migrate:dev": "tsx src/server/cli/migrate.ts"
   },

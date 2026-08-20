@@ -11,7 +11,8 @@ import type {
   Reaction,
   Role,
   SmsDelivery,
-  SmsDeliveryStatus
+  SmsDeliveryStatus,
+  SmsGatewayHealth
 } from "../domain.js";
 import { runMigrations } from "./migrations.js";
 
@@ -57,11 +58,30 @@ type DeliveryRow = {
   phone_number: string;
   provider: string;
   provider_message_id: string | null;
+  provider_status: string | null;
+  provider_parts_count: number | null;
+  provider_status_updated_at: number | null;
   status: SmsDeliveryStatus;
   attempts: number;
   last_error: string | null;
   available_at: number;
   created_at: number;
+  updated_at: number;
+};
+
+type GatewayHealthRow = {
+  provider: string;
+  device_id: string;
+  status: "pass" | "warn" | "fail" | "unknown";
+  version: string | null;
+  battery_level: number | null;
+  charging: number | null;
+  connection_available: number | null;
+  cellular_type: number | null;
+  carrier_name: string | null;
+  last_event_at: number;
+  last_ping_at: number | null;
+  last_app_started_at: number | null;
   updated_at: number;
 };
 
@@ -457,11 +477,68 @@ export class SqliteStore {
     return rows.map((row) => this.mapDelivery(row));
   }
 
-  markDeliveryAccepted(id: string, providerMessageId?: string): void {
+  markDeliveryAccepted(id: string, providerMessageId?: string, providerStatus?: string): void {
     this.db.prepare(`
-      UPDATE sms_deliveries SET status = 'ACCEPTED', provider_message_id = ?, last_error = NULL,
-        locked_at = NULL, updated_at = ? WHERE id = ?
-    `).run(providerMessageId ?? null, Date.now(), id);
+      UPDATE sms_deliveries SET
+        status = CASE WHEN provider_status IN ('FAILED', 'CANCELLED') THEN 'FAILED' ELSE 'ACCEPTED' END,
+        provider_message_id = ?,
+        provider_status = COALESCE(provider_status, ?),
+        provider_status_updated_at = CASE WHEN provider_status IS NULL AND ? IS NOT NULL THEN ? ELSE provider_status_updated_at END,
+        last_error = CASE WHEN provider_status IN ('FAILED', 'CANCELLED') THEN last_error ELSE NULL END,
+        locked_at = NULL,
+        updated_at = ?
+      WHERE id = ?
+    `).run(providerMessageId ?? null, providerStatus ?? null, providerStatus ?? null, Date.now(), Date.now(), id);
+  }
+
+  updateDeliveryProviderStatus(input: {
+    provider: string;
+    providerMessageId: string;
+    providerStatus: "SENT" | "DELIVERED" | "FAILED" | "CANCELLED";
+    partsCount?: number;
+    error?: string;
+  }): boolean {
+    const now = Date.now();
+    const failed = input.providerStatus === "FAILED" || input.providerStatus === "CANCELLED";
+    return this.db.prepare(`
+      UPDATE sms_deliveries SET
+        provider_message_id = COALESCE(provider_message_id, ?),
+        provider_status = CASE
+          WHEN provider_status IN ('FAILED', 'CANCELLED') THEN provider_status
+          WHEN provider_status = 'DELIVERED' AND ? = 'SENT' THEN provider_status
+          ELSE ?
+        END,
+        provider_parts_count = COALESCE(?, provider_parts_count),
+        provider_status_updated_at = ?,
+        status = CASE
+          WHEN provider_status IN ('FAILED', 'CANCELLED') THEN 'FAILED'
+          WHEN ? = 1 THEN 'FAILED'
+          WHEN ? IN ('SENT', 'DELIVERED') THEN 'ACCEPTED'
+          ELSE status
+        END,
+        last_error = CASE
+          WHEN provider_status IN ('FAILED', 'CANCELLED') THEN last_error
+          WHEN ? = 1 THEN ?
+          ELSE last_error
+        END,
+        locked_at = NULL,
+        updated_at = ?
+      WHERE provider = ? AND (provider_message_id = ? OR id = ?)
+    `).run(
+      input.providerMessageId,
+      input.providerStatus,
+      input.providerStatus,
+      input.partsCount ?? null,
+      now,
+      failed ? 1 : 0,
+      input.providerStatus,
+      failed ? 1 : 0,
+      input.error ?? `Android gateway reported ${input.providerStatus.toLowerCase()}`,
+      now,
+      input.provider,
+      input.providerMessageId,
+      input.providerMessageId
+    ).changes > 0;
   }
 
   markDeliveryRetry(id: string, error: string, availableAt: number): void {
@@ -484,6 +561,15 @@ export class SqliteStore {
     `).run(Date.now()).changes;
   }
 
+  failInactiveProviderDeliveries(activeProvider: string): number {
+    return this.db.prepare(`
+      UPDATE sms_deliveries SET status = 'FAILED',
+        last_error = 'SMS provider changed; review and retry with the active provider',
+        locked_at = NULL, updated_at = ?
+      WHERE status = 'PENDING' AND provider <> ?
+    `).run(Date.now(), activeProvider).changes;
+  }
+
   listDeliveryFailures(limit = 50): SmsDelivery[] {
     const rows = this.db.prepare(`
       SELECT d.*, m.display_name AS member_name FROM sms_deliveries d
@@ -494,17 +580,91 @@ export class SqliteStore {
     return rows.map((row) => this.mapDelivery(row));
   }
 
-  retryDelivery(id: string): boolean {
+  retryDelivery(id: string, provider?: string): boolean {
     return this.db.prepare(`
       UPDATE sms_deliveries SET status = 'PENDING', attempts = 0, last_error = NULL,
+        provider = COALESCE(?, provider), provider_message_id = NULL,
+        provider_status = NULL, provider_parts_count = NULL, provider_status_updated_at = NULL,
         available_at = ?, updated_at = ? WHERE id = ? AND status IN ('FAILED', 'SKIPPED_LIMIT')
-    `).run(Date.now(), Date.now(), id).changes === 1;
+    `).run(provider ?? null, Date.now(), Date.now(), id).changes === 1;
   }
 
   recordSecurityEvent(eventType: string, maskedPhone?: string, details?: Record<string, unknown>): void {
     this.db.prepare(`
       INSERT INTO security_events(id, event_type, masked_phone, details_json, created_at) VALUES (?, ?, ?, ?, ?)
     `).run(randomUUID(), eventType, maskedPhone ?? null, details ? JSON.stringify(details) : null, Date.now());
+  }
+
+  updateGatewayHealth(input: {
+    provider: string;
+    deviceId: string;
+    status?: "pass" | "warn" | "fail" | "unknown";
+    version?: string;
+    batteryLevel?: number;
+    charging?: boolean;
+    connectionAvailable?: boolean;
+    cellularType?: number;
+    carrierName?: string;
+    ping?: boolean;
+    appStarted?: boolean;
+  }): SmsGatewayHealth {
+    const now = Date.now();
+    this.db.prepare(`
+      INSERT INTO sms_gateway_health(
+        provider, device_id, status, version, battery_level, charging,
+        connection_available, cellular_type, carrier_name, last_event_at,
+        last_ping_at, last_app_started_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(provider) DO UPDATE SET
+        device_id = excluded.device_id,
+        status = CASE WHEN ? IS NULL THEN sms_gateway_health.status ELSE excluded.status END,
+        version = COALESCE(excluded.version, sms_gateway_health.version),
+        battery_level = COALESCE(excluded.battery_level, sms_gateway_health.battery_level),
+        charging = COALESCE(excluded.charging, sms_gateway_health.charging),
+        connection_available = COALESCE(excluded.connection_available, sms_gateway_health.connection_available),
+        cellular_type = COALESCE(excluded.cellular_type, sms_gateway_health.cellular_type),
+        carrier_name = COALESCE(excluded.carrier_name, sms_gateway_health.carrier_name),
+        last_event_at = excluded.last_event_at,
+        last_ping_at = COALESCE(excluded.last_ping_at, sms_gateway_health.last_ping_at),
+        last_app_started_at = COALESCE(excluded.last_app_started_at, sms_gateway_health.last_app_started_at),
+        updated_at = excluded.updated_at
+    `).run(
+      input.provider,
+      input.deviceId,
+      input.status ?? "unknown",
+      input.version ?? null,
+      input.batteryLevel ?? null,
+      input.charging == null ? null : input.charging ? 1 : 0,
+      input.connectionAvailable == null ? null : input.connectionAvailable ? 1 : 0,
+      input.cellularType ?? null,
+      input.carrierName ?? null,
+      now,
+      input.ping ? now : null,
+      input.appStarted ? now : null,
+      now,
+      input.status ?? null
+    );
+    return this.getGatewayHealth(input.provider)!;
+  }
+
+  getGatewayHealth(provider: string): SmsGatewayHealth | undefined {
+    const row = this.db.prepare("SELECT * FROM sms_gateway_health WHERE provider = ?").get(provider) as GatewayHealthRow | undefined;
+    if (!row) return undefined;
+    return {
+      provider: row.provider,
+      deviceId: row.device_id,
+      status: row.status,
+      version: row.version ?? undefined,
+      batteryLevel: row.battery_level ?? undefined,
+      charging: row.charging == null ? undefined : Boolean(row.charging),
+      connectionAvailable: row.connection_available == null ? undefined : Boolean(row.connection_available),
+      cellularType: row.cellular_type ?? undefined,
+      carrierName: row.carrier_name ?? undefined,
+      lastEventAt: new Date(row.last_event_at).toISOString(),
+      lastPingAt: iso(row.last_ping_at),
+      lastAppStartedAt: iso(row.last_app_started_at),
+      updatedAt: new Date(row.updated_at).toISOString()
+    };
   }
 
   private messageSelect(suffix: string): Database.Statement {
@@ -610,6 +770,8 @@ export class SqliteStore {
       phoneNumber: row.phone_number,
       provider: row.provider,
       providerMessageId: row.provider_message_id ?? undefined,
+      providerStatus: row.provider_status ?? undefined,
+      providerPartsCount: row.provider_parts_count ?? undefined,
       status: row.status,
       attempts: row.attempts,
       lastError: row.last_error ?? undefined,

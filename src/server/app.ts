@@ -21,6 +21,7 @@ import { cleanErrorMessage } from "./security.js";
 import { AuthError, AuthService } from "./services/auth-service.js";
 import { ChatService } from "./services/chat-service.js";
 import { SmsQueueWorker } from "./services/sms-queue.js";
+import { AndroidGatewayProvider } from "./sms/android-gateway.js";
 import { DisabledSmsProvider, type SmsProvider } from "./sms/provider.js";
 import { VoipMsProvider } from "./sms/voipms.js";
 
@@ -45,10 +46,12 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<BuiltApp>
   const config = options.config ?? loadConfig();
   const ownsStore = !options.store;
   const store = options.store ?? new SqliteStore(config.databasePath);
-  store.ensureDefaultGroup(config.groupName, config.voipmsDid);
+  store.ensureDefaultGroup(config.groupName, config.smsDid);
   store.pruneExpiredAuthData();
   mkdirSync(config.uploadsPath, { recursive: true });
-  const provider = options.provider ?? (config.smsEnabled ? new VoipMsProvider(config) : new DisabledSmsProvider());
+  const provider = options.provider ?? (config.smsEnabled
+    ? config.smsProvider === "android_gateway" ? new AndroidGatewayProvider(config) : new VoipMsProvider(config)
+    : new DisabledSmsProvider());
   const events = new ChatEventBus();
   const auth = new AuthService(store, config, provider);
   const chat = new ChatService(store, config, events, provider.name);
@@ -91,11 +94,25 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<BuiltApp>
   registerAuthRoutes(app, auth, config);
   registerChatRoutes(app, auth, chat, store, config);
   registerAdminRoutes(app, auth, store, config, worker);
-  registerWebhookRoutes(app, chat, config);
+  registerWebhookRoutes(app, chat, store, config);
 
   app.get("/health", async (_request, reply) => {
     const database = store.healthCheck() ? "ok" : "error";
-    return reply.code(database === "ok" ? 200 : 503).send({ status: database === "ok" ? "ok" : "error", database });
+    const gateway = config.smsProvider === "android_gateway" && config.smsEnabled
+      ? store.getGatewayHealth("android_gateway")
+      : undefined;
+    const stale = gateway ? Date.now() - new Date(gateway.lastEventAt).getTime() > config.androidGatewayHealthStaleSeconds * 1000 : true;
+    return reply.code(database === "ok" ? 200 : 503).send({
+      status: database === "ok" ? "ok" : "error",
+      database,
+      ...(config.smsProvider === "android_gateway" ? {
+        smsGateway: {
+          enabled: config.smsEnabled,
+          status: !config.smsEnabled ? "disabled" : stale ? "stale" : gateway?.status ?? "unknown",
+          lastSeenAt: gateway?.lastEventAt
+        }
+      } : {})
+    });
   });
 
   const io = new SocketServer(app.server, {

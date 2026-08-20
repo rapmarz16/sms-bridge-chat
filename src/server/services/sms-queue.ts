@@ -19,6 +19,7 @@ export class SmsQueueWorker {
     if (!this.stopped) return;
     this.stopped = false;
     this.store.failUncertainSendingDeliveries();
+    this.store.failInactiveProviderDeliveries(this.config.smsProvider);
     this.schedule(0);
   }
 
@@ -94,10 +95,10 @@ export class SmsQueueWorker {
       return;
     }
     try {
-      const result = await this.provider.sendSms(delivery.phoneNumber, text);
+      const result = await this.provider.sendSms(delivery.phoneNumber, text, { idempotencyKey: delivery.id });
       if (!result.accepted) throw new SmsProviderError("Provider did not accept message", true);
       this.store.finishProviderAttempt(reservation.attemptId, "ACCEPTED");
-      this.store.markDeliveryAccepted(id, result.providerMessageId);
+      this.store.markDeliveryAccepted(id, result.providerMessageId, result.providerStatus);
     } catch (error) {
       const safeError = cleanErrorMessage(error);
       this.store.finishProviderAttempt(reservation.attemptId, "FAILED", safeError);

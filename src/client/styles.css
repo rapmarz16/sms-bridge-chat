@@ -320,6 +320,17 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .warning .meter i { background: #d39431; }
 .danger .meter i { background: var(--clay); }
 .usage-card p { margin: 0; color: #68756f; font-size: 10px; line-height: 1.5; }
+.gateway-card { padding: 13px 15px; margin: -8px 0 20px; border: 1px solid #d7ddd8; border-radius: 12px; background: #fff; }
+.gateway-card.gateway-warn, .gateway-card.gateway-stale { border-color: #e8d4a5; background: #fffaf0; }
+.gateway-card.gateway-fail { border-color: #ecc1b7; background: #fff6f3; }
+.gateway-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.gateway-top > div { min-width: 0; display: grid; gap: 2px; }
+.gateway-top span { color: #77847f; font-size: 8px; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; }
+.gateway-top strong { font-size: 12px; }
+.gateway-top b { border-radius: 999px; padding: 4px 7px; background: #dceee6; color: #2a624f; font-size: 8px; text-transform: uppercase; letter-spacing: .07em; }
+.gateway-warn .gateway-top b, .gateway-stale .gateway-top b { background: #f5e7cd; color: #805121; }
+.gateway-fail .gateway-top b { background: #f2dfe5; color: #8c3f52; }
+.gateway-card p { margin: 8px 0 0; color: #77847f; font-size: 9px; line-height: 1.45; }
 .admin-member-list { border-top: 1px solid var(--line); }
 .admin-member { min-height: 63px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--line); padding: 8px 2px; }
 .admin-member.inactive { opacity: .48; }

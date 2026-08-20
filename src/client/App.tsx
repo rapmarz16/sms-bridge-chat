@@ -209,8 +209,31 @@ function MembersPanel({ members }: { members: Member[] }) {
 type AdminStatus = {
   usage: SmsUsage;
   failures: SmsDelivery[];
-  bridge: { configured: boolean; enabled: boolean; providerParametersVerified: boolean };
+  bridge: { configured: boolean; enabled: boolean; provider: "voipms" | "android_gateway"; providerParametersVerified: boolean };
+  gateway?: {
+    status: "pass" | "warn" | "fail" | "stale" | "unknown";
+    stale: boolean;
+    version?: string;
+    batteryLevel?: number;
+    charging?: boolean;
+    connectionAvailable?: boolean;
+    cellularType?: number;
+    carrierName?: string;
+    lastSeenAt?: string;
+    lastPingAt?: string;
+    lastAppStartedAt?: string;
+  };
 };
+
+function gatewaySummary(gateway: NonNullable<AdminStatus["gateway"]>): string {
+  const details: string[] = [];
+  if (gateway.batteryLevel != null) details.push(`${Math.round(gateway.batteryLevel)}% battery${gateway.charging ? ", connected to power" : ""}`);
+  if (gateway.connectionAvailable === false) details.push("network unavailable");
+  if (gateway.lastSeenAt) {
+    details.push(`last check-in ${new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(gateway.lastSeenAt))}`);
+  }
+  return details.length > 0 ? details.join(" · ") : "Waiting for the phone's first signed heartbeat.";
+}
 
 function AdminPanel({ bootstrap, onChanged }: { bootstrap: Bootstrap; onChanged: () => Promise<void> }) {
   const [members, setMembers] = useState<Member[]>([]);
@@ -277,6 +300,15 @@ function AdminPanel({ bootstrap, onChanged }: { bootstrap: Bootstrap; onChanged:
           <div className="usage-top"><div><span>SMS today</span><strong>{status.usage.used} <small>/ {status.usage.limit}</small></strong></div><button type="button" className={`switch ${status.bridge.enabled ? "on" : ""}`} onClick={toggleBridge} aria-pressed={status.bridge.enabled}><i /></button></div>
           <div className="meter"><i style={{ width: `${Math.min(100, status.usage.percentage)}%` }} /></div>
           <p>{!status.bridge.configured ? "Provider credentials are not enabled." : !status.bridge.providerParametersVerified ? "Provider parameters still need portal verification." : status.bridge.enabled ? "Bridge is accepting inbound messages and sending queued deliveries." : "Bridge paused. Canonical chat continues normally."}</p>
+        </section>
+      )}
+      {status?.gateway && (
+        <section className={`gateway-card gateway-${status.gateway.status}`}>
+          <div className="gateway-top">
+            <div><span>Android SMS gateway</span><strong>{status.gateway.carrierName ?? "SIM phone"}</strong></div>
+            <b>{status.gateway.status}</b>
+          </div>
+          <p>{gatewaySummary(status.gateway)}</p>
         </section>
       )}
       <div className="admin-member-list">

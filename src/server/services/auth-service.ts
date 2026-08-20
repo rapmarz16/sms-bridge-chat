@@ -61,7 +61,11 @@ export class AuthService {
         throw new AuthError("The daily SMS limit has been reached", 503, "SMS_LIMIT");
       }
       try {
-        await this.provider.sendSms(phone, `Your SMS Bridge Chat code is ${code}. It expires in ${this.config.otpTtlMinutes} minutes.`);
+        await this.provider.sendSms(
+          phone,
+          `Your SMS Bridge Chat code is ${code}. It expires in ${this.config.otpTtlMinutes} minutes.`,
+          { idempotencyKey: challengeId }
+        );
         this.store.finishProviderAttempt(reservation.attemptId, "ACCEPTED");
       } catch (error) {
         const safeError = cleanErrorMessage(error);

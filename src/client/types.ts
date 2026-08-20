@@ -69,6 +69,8 @@ export type SmsDelivery = {
   memberName: string;
   phoneNumber: string;
   status: string;
+  providerStatus?: string;
+  providerPartsCount?: number;
   attempts: number;
   lastError?: string;
   updatedAt: string;

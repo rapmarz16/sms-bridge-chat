@@ -4,15 +4,16 @@ import { tmpdir } from "node:os";
 import type { LightMyRequestResponse } from "fastify";
 import { buildApp, type BuiltApp } from "../src/server/app.js";
 import { loadConfig, type AppConfig } from "../src/server/config.js";
-import type { SendResult, SmsProvider } from "../src/server/sms/provider.js";
+import type { SendOptions, SendResult, SmsProvider } from "../src/server/sms/provider.js";
 
 export class FakeSmsProvider implements SmsProvider {
-  readonly name = "fake";
-  readonly sent: Array<{ to: string; text: string }> = [];
+  readonly sent: Array<{ to: string; text: string; options?: SendOptions }> = [];
   failure?: Error;
 
-  async sendSms(to: string, text: string): Promise<SendResult> {
-    this.sent.push({ to, text });
+  constructor(readonly name = "fake") {}
+
+  async sendSms(to: string, text: string, options?: SendOptions): Promise<SendResult> {
+    this.sent.push({ to, text, options });
     if (this.failure) throw this.failure;
     return { accepted: true, providerMessageId: `fake-${this.sent.length}` };
   }
@@ -26,7 +27,7 @@ export type TestContext = {
   close: () => Promise<void>;
 };
 
-export async function createTestContext(overrides: Record<string, string> = {}): Promise<TestContext> {
+export async function createTestContext(overrides: Record<string, string> = {}, providerName = "fake"): Promise<TestContext> {
   const directory = mkdtempSync(join(tmpdir(), "sms-bridge-test-"));
   const config = loadConfig({
     NODE_ENV: "test",
@@ -43,7 +44,7 @@ export async function createTestContext(overrides: Record<string, string> = {}):
     LOG_LEVEL: "silent",
     ...overrides
   });
-  const provider = new FakeSmsProvider();
+  const provider = new FakeSmsProvider(providerName);
   const built = await buildApp({ config, provider, startWorker: false, serveClient: false });
   return {
     built,

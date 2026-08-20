@@ -1,6 +1,12 @@
 export type SendResult = {
   accepted: boolean;
   providerMessageId?: string;
+  providerStatus?: string;
+};
+
+export type SendOptions = {
+  /** Stable per-delivery identifier used when the provider supports idempotent submission. */
+  idempotencyKey?: string;
 };
 
 export type MediaItem = {
@@ -10,7 +16,7 @@ export type MediaItem = {
 
 export interface SmsProvider {
   readonly name: string;
-  sendSms(to: string, text: string): Promise<SendResult>;
+  sendSms(to: string, text: string, options?: SendOptions): Promise<SendResult>;
   sendMms?(to: string, text: string, media: MediaItem[]): Promise<SendResult>;
 }
 
