@@ -62,6 +62,17 @@ export function registerChatRoutes(
     return { messages: store.listMessages(group.id, query) };
   });
 
+  app.get("/api/messages/search", async (request) => {
+    const member = requireMember(request, auth);
+    const group = store.getDefaultGroup();
+    if (!store.memberBelongsToGroup(member.id, group.id)) return { messages: [] };
+    const query = z.object({
+      q: z.string().trim().min(2).max(100),
+      limit: z.coerce.number().int().min(1).max(100).default(50)
+    }).parse(request.query);
+    return { messages: store.searchMessages(group.id, query.q, query.limit) };
+  });
+
   app.post("/api/messages", async (request, reply) => {
     const member = requireMember(request, auth);
     requireCsrf(request, config);

@@ -92,6 +92,45 @@ describe("milestone 1 local chat", () => {
     expect(history.json().messages[0].reactions[0].emoji).toBe("❤️");
   });
 
+  it("searches the complete canonical history by message text or sender name", async () => {
+    context = await createTestContext();
+    const auth = await login(context);
+    const group = context.built.store.getDefaultGroup();
+    const david = context.built.store.createMember({
+      groupId: group.id,
+      displayName: "David Cohen",
+      phoneNumberE164: "+14165550144",
+      role: "MEMBER",
+      deliveryMode: "APP"
+    });
+    for (let index = 0; index < 55; index += 1) {
+      context.built.chat.sendAppMessage(david, { body: index === 0 ? "The hidden apricot message" : `Routine update ${index}` });
+    }
+
+    const byText = await context.built.app.inject({
+      method: "GET",
+      url: "/api/messages/search?q=apricot",
+      headers: { cookie: auth.cookie }
+    });
+    expect(byText.statusCode).toBe(200);
+    expect(byText.json().messages.map((message: { body: string }) => message.body)).toEqual(["The hidden apricot message"]);
+
+    const bySender = await context.built.app.inject({
+      method: "GET",
+      url: "/api/messages/search?q=david%20cohen&limit=10",
+      headers: { cookie: auth.cookie }
+    });
+    expect(bySender.statusCode).toBe(200);
+    expect(bySender.json().messages).toHaveLength(10);
+
+    const literalWildcard = await context.built.app.inject({
+      method: "GET",
+      url: "/api/messages/search?q=%25",
+      headers: { cookie: auth.cookie }
+    });
+    expect(literalWildcard.statusCode).toBe(400);
+  });
+
   it("lets an administrator add, edit, and deactivate a member", async () => {
     context = await createTestContext();
     const auth = await login(context);

@@ -2,11 +2,12 @@
 
 A private, self-hosted group chat where installing an app is optional. The application database is the canonical conversation; the PWA and ordinary SMS are two clients of that same conversation.
 
-> Current build status: the text MVP and private in-app photo attachments are implemented and covered by 47 automated tests. It can use either VoIP.ms or a dedicated Android phone/SIM. The remaining production gates are obtaining carrier approval for the expected automated volume and validating real Canadian/U.S. delivery. Carrier MMS relay remains deliberately deferred.
+> Current build status: the text MVP and private in-app photo attachments are implemented and covered by 48 automated tests. It can use either VoIP.ms or a dedicated Android phone/SIM. The remaining production gates are obtaining carrier approval for the expected automated volume and validating real Canadian/U.S. delivery. Carrier MMS relay remains deliberately deferred.
 
 ## What is implemented
 
-- Mobile-first installable PWA with safe Markdown, replies, emoji, and reactions
+- Mobile-first installable PWA with large touch controls, safe Markdown, replies, emoji, and reactions
+- Full-history message/sender search, copy-message actions, local draft recovery, and a new-message jump control
 - Pre-created members with `APP`, `SMS`, or `BOTH` delivery modes
 - Six-digit SMS OTP flow, hashed challenges, bounded attempts, and durable sessions
 - Secure HTTP-only session cookies plus CSRF and same-origin checks

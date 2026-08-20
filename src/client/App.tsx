@@ -8,6 +8,7 @@ import { disableWebPush, enableWebPush, supportsWebPush, syncWebPush, webPushIsE
 import type { Bootstrap, Member, Message, Reaction, SmsDelivery, SmsUsage } from "./types";
 
 const REACTIONS = ["👍", "❤️", "😂", "😮"] as const;
+const COMMON_EMOJIS = ["😀", "😂", "😍", "🥰", "👍", "👏", "🙏", "🎉", "❤️", "🔥", "✅", "😮", "😢", "🤔", "🙌", "💯"] as const;
 
 function initials(name: string): string {
   return name.split(/\s+/).slice(0, 2).map((part) => part[0]).join("").toUpperCase();
@@ -28,6 +29,22 @@ function dayLabel(value: string): string {
 
 function truncate(value: string, length = 90): string {
   return value.length > length ? `${value.slice(0, length - 1)}…` : value;
+}
+
+async function copyText(value: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const fallback = document.createElement("textarea");
+  fallback.value = value;
+  fallback.style.position = "fixed";
+  fallback.style.opacity = "0";
+  document.body.append(fallback);
+  fallback.select();
+  const copied = document.execCommand("copy");
+  fallback.remove();
+  if (!copied) throw new Error("Copy is unavailable in this browser");
 }
 
 function ErrorBanner({ message, onDismiss }: { message: string; onDismiss: () => void }) {
@@ -122,7 +139,8 @@ function MessageItem({
   previous,
   onReply,
   onReact,
-  onDelete
+  onDelete,
+  onCopy
 }: {
   message: Message;
   currentMember: Member;
@@ -130,6 +148,7 @@ function MessageItem({
   onReply: (message: Message) => void;
   onReact: (message: Message, emoji: string, remove: boolean) => void;
   onDelete: (message: Message) => void;
+  onCopy: (message: Message) => void;
 }) {
   const mine = message.senderMemberId === currentMember.id;
   const canDelete = !message.deletedAt && (currentMember.role === "ADMIN" || (mine && message.source === "APP"));
@@ -141,7 +160,7 @@ function MessageItem({
   })).filter((group) => group.items.length > 0), [message.reactions]);
 
   return (
-    <article className={`message-row ${mine ? "mine" : "theirs"} ${continuation ? "continuation" : ""}`}>
+    <article id={`message-${message.id}`} className={`message-row ${mine ? "mine" : "theirs"} ${continuation ? "continuation" : ""}`}>
       {!mine && !continuation && <div className="avatar" aria-hidden="true">{initials(message.senderName)}</div>}
       <div className="message-column">
         {!continuation && (
@@ -167,18 +186,19 @@ function MessageItem({
             ))}
           </div>
           {!message.deletedAt && (
-            <div className="message-actions">
-              <button type="button" onClick={() => onReply(message)} aria-label={`Reply to ${message.senderName}`}>↩</button>
+            <div className="message-actions" aria-label={`Actions for ${message.senderName}'s message`}>
+              <button type="button" onClick={() => onReply(message)} aria-label={`Reply to ${message.senderName}`} title="Reply"><span aria-hidden="true">↩</span></button>
               <details>
-                <summary aria-label="Add a reaction">☺</summary>
+                <summary aria-label="Add a reaction" title="React"><span aria-hidden="true">☺</span></summary>
                 <div className="reaction-menu">
                   {REACTIONS.map((emoji) => {
                     const mineReaction = message.reactions.some((reaction) => reaction.emoji === emoji && reaction.memberId === currentMember.id);
-                    return <button type="button" key={emoji} className={mineReaction ? "selected" : ""} onClick={() => onReact(message, emoji, mineReaction)}>{emoji}</button>;
+                    return <button type="button" key={emoji} className={mineReaction ? "selected" : ""} aria-label={`${mineReaction ? "Remove" : "Add"} ${emoji} reaction`} onClick={(event) => { onReact(message, emoji, mineReaction); event.currentTarget.closest("details")?.removeAttribute("open"); }}>{emoji}</button>;
                   })}
                 </div>
               </details>
-              {canDelete && <button type="button" className="delete-message" onClick={() => onDelete(message)} aria-label={`Delete message from ${message.senderName}`} title="Delete message">⌫</button>}
+              <button type="button" onClick={() => onCopy(message)} aria-label="Copy message" title="Copy"><span aria-hidden="true">⧉</span></button>
+              {canDelete && <button type="button" className="delete-message" onClick={() => onDelete(message)} aria-label={`Delete message from ${message.senderName}`} title="Delete message"><span aria-hidden="true">⌫</span></button>}
             </div>
           )}
         </div>
@@ -451,24 +471,92 @@ function SettingsPanel({ member, pushConfiguration, onLogout }: { member: Member
 }
 
 function Chat({ bootstrap: initial, onUnauthenticated }: { bootstrap: Bootstrap; onUnauthenticated: () => void }) {
+  const draftKey = `sms-bridge-chat:draft:${initial.group.id}:${initial.currentMember.id}`;
   const [data, setData] = useState(initial);
   const [messages, setMessages] = useState(initial.messages);
-  const [composer, setComposer] = useState("");
+  const [composer, setComposer] = useState(() => {
+    try { return localStorage.getItem(draftKey) ?? ""; }
+    catch { return ""; }
+  });
   const [replyingTo, setReplyingTo] = useState<Message>();
   const [panel, setPanel] = useState<"members" | "admin" | "settings" | null>(null);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [sending, setSending] = useState(false);
   const [photo, setPhoto] = useState<File>();
   const [loadingOlder, setLoadingOlder] = useState(false);
+  const [emojiOpen, setEmojiOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<Message[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [atBottom, setAtBottom] = useState(true);
+  const [newMessageCount, setNewMessageCount] = useState(0);
   const listRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const photoInputRef = useRef<HTMLInputElement>(null);
   const socketRef = useRef<Socket | undefined>(undefined);
+  const atBottomRef = useRef(true);
+  const searchOpenRef = useRef(false);
   const photoPreview = useMemo(() => photo ? URL.createObjectURL(photo) : undefined, [photo]);
+  const normalizedSearch = searchQuery.trim();
+  const searchActive = searchOpen && normalizedSearch.length >= 2;
+  const visibleMessages = searchActive ? searchResults : messages;
+
+  const scrollToLatest = useCallback((behavior: ScrollBehavior = "smooth") => {
+    const list = listRef.current;
+    if (!list) return;
+    list.scrollTo({ top: list.scrollHeight, behavior });
+    atBottomRef.current = true;
+    setAtBottom(true);
+    setNewMessageCount(0);
+  }, []);
 
   useEffect(() => () => {
     if (photoPreview) URL.revokeObjectURL(photoPreview);
   }, [photoPreview]);
+
+  useEffect(() => {
+    try {
+      if (composer) localStorage.setItem(draftKey, composer);
+      else localStorage.removeItem(draftKey);
+    } catch { /* Draft recovery is best-effort on restricted browsers. */ }
+  }, [composer, draftKey]);
+
+  useEffect(() => {
+    if (!notice) return;
+    const timeout = window.setTimeout(() => setNotice(""), 2200);
+    return () => window.clearTimeout(timeout);
+  }, [notice]);
+
+  useEffect(() => {
+    searchOpenRef.current = searchOpen;
+    if (searchOpen) requestAnimationFrame(() => searchInputRef.current?.focus());
+  }, [searchOpen]);
+
+  useEffect(() => {
+    if (!searchActive) {
+      setSearchResults([]);
+      setSearching(false);
+      return;
+    }
+    const controller = new AbortController();
+    setSearching(true);
+    const timeout = window.setTimeout(() => {
+      void api<{ messages: Message[] }>(`/api/messages/search?q=${encodeURIComponent(normalizedSearch)}&limit=50`, { signal: controller.signal })
+        .then((result) => setSearchResults(result.messages))
+        .catch((reason) => {
+          if (reason instanceof DOMException && reason.name === "AbortError") return;
+          setError(reason instanceof Error ? reason.message : "Could not search messages");
+        })
+        .finally(() => { if (!controller.signal.aborted) setSearching(false); });
+    }, 250);
+    return () => {
+      controller.abort();
+      window.clearTimeout(timeout);
+    };
+  }, [normalizedSearch, searchActive]);
 
   const refresh = useCallback(async () => {
     const next = await api<Bootstrap>("/api/bootstrap");
@@ -498,31 +586,47 @@ function Chat({ bootstrap: initial, onUnauthenticated }: { bootstrap: Bootstrap;
     socketRef.current = socket;
     socket.on("message:new", (message: Message) => {
       setMessages((current) => current.some((item) => item.id === message.id) ? current : [...current, message]);
+      if (atBottomRef.current && !searchOpenRef.current) requestAnimationFrame(() => scrollToLatest());
+      else setNewMessageCount((current) => current + 1);
     });
     socket.on("reaction:added", (reaction: Reaction) => {
-      setMessages((current) => current.map((message) => message.id === reaction.messageId
+      const update = (current: Message[]) => current.map((message) => message.id === reaction.messageId
         ? { ...message, reactions: message.reactions.some((item) => item.id === reaction.id) ? message.reactions : [...message.reactions, reaction] }
-        : message));
+        : message);
+      setMessages(update);
+      setSearchResults(update);
     });
     socket.on("reaction:removed", (event: { messageId: string; memberId: string; emoji: string }) => {
-      setMessages((current) => current.map((message) => message.id === event.messageId
+      const update = (current: Message[]) => current.map((message) => message.id === event.messageId
         ? { ...message, reactions: message.reactions.filter((item) => !(item.memberId === event.memberId && item.emoji === event.emoji)) }
-        : message));
+        : message);
+      setMessages(update);
+      setSearchResults(update);
     });
     socket.on("message:deleted", (event: { messageId: string; deletedAt: string }) => {
-      setMessages((current) => current.map((message) => {
+      const update = (current: Message[]) => current.map((message) => {
         if (message.id === event.messageId) return { ...message, body: "Message removed", deletedAt: event.deletedAt, reactions: [], attachments: [] };
         if (message.replyTo?.id === event.messageId) return { ...message, replyTo: { ...message.replyTo, body: "Message removed" } };
         return message;
-      }));
+      });
+      setMessages(update);
+      setSearchResults(update);
     });
     return () => { socket.close(); };
-  }, []);
+  }, [scrollToLatest]);
 
   useEffect(() => {
+    requestAnimationFrame(() => scrollToLatest("auto"));
+  }, [scrollToLatest]);
+
+  function handleMessageScroll() {
     const list = listRef.current;
-    if (list) list.scrollTo({ top: list.scrollHeight, behavior: messages.length > initial.messages.length ? "smooth" : "auto" });
-  }, [messages.length, initial.messages.length]);
+    if (!list) return;
+    const nextAtBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 120;
+    atBottomRef.current = nextAtBottom;
+    setAtBottom(nextAtBottom);
+    if (nextAtBottom) setNewMessageCount(0);
+  }
 
   async function sendMessage() {
     const body = composer.trim();
@@ -543,8 +647,9 @@ function Chat({ bootstrap: initial, onUnauthenticated }: { bootstrap: Bootstrap;
         });
       }
       setMessages((current) => current.some((item) => item.id === result.message.id) ? current : [...current, result.message]);
-      setComposer(""); setPhoto(undefined); setReplyingTo(undefined);
+      setComposer(""); setPhoto(undefined); setReplyingTo(undefined); setEmojiOpen(false); setSearchOpen(false);
       if (photoInputRef.current) photoInputRef.current.value = "";
+      requestAnimationFrame(() => scrollToLatest());
     } catch (reason) {
       if (reason instanceof ApiError && reason.status === 401) return onUnauthenticated();
       setError(reason instanceof Error ? reason.message : "Could not send message");
@@ -580,6 +685,29 @@ function Chat({ bootstrap: initial, onUnauthenticated }: { bootstrap: Bootstrap;
     requestAnimationFrame(() => { target.focus(); target.setSelectionRange(start + before.length, start + before.length + selected.length); });
   }
 
+  function addEmoji(emoji: string) {
+    const target = textareaRef.current;
+    const start = target?.selectionStart ?? composer.length;
+    const end = target?.selectionEnd ?? composer.length;
+    setComposer(`${composer.slice(0, start)}${emoji}${composer.slice(end)}`);
+    setEmojiOpen(false);
+    requestAnimationFrame(() => {
+      target?.focus();
+      target?.setSelectionRange(start + emoji.length, start + emoji.length);
+    });
+  }
+
+  async function copyMessage(message: Message) {
+    const attachmentUrls = message.attachments.map((attachment) => new URL(attachment.url, window.location.origin).href);
+    const content = [message.body, ...attachmentUrls].filter(Boolean).join("\n");
+    try {
+      await copyText(content);
+      setNotice("Message copied");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not copy message");
+    }
+  }
+
   async function react(message: Message, emoji: string, remove: boolean) {
     try {
       if (remove) {
@@ -597,11 +725,13 @@ function Chat({ bootstrap: initial, onUnauthenticated }: { bootstrap: Bootstrap;
     if (!window.confirm(warning)) return;
     try {
       const result = await api<{ message: Message }>(`/api/messages/${message.id}`, { method: "DELETE" });
-      setMessages((current) => current.map((item) => {
+      const update = (current: Message[]) => current.map((item) => {
         if (item.id === result.message.id) return result.message;
         if (item.replyTo?.id === result.message.id) return { ...item, replyTo: { ...item.replyTo, body: "Message removed" } };
         return item;
-      }));
+      });
+      setMessages(update);
+      setSearchResults(update);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not delete message");
     }
@@ -610,11 +740,29 @@ function Chat({ bootstrap: initial, onUnauthenticated }: { bootstrap: Bootstrap;
   async function loadOlder() {
     const first = messages[0];
     if (!first) return;
+    const list = listRef.current;
+    const previousHeight = list?.scrollHeight ?? 0;
+    const previousTop = list?.scrollTop ?? 0;
     setLoadingOlder(true);
     try {
       const result = await api<{ messages: Message[] }>(`/api/messages?before=${new Date(first.createdAt).getTime()}&limit=50`);
       setMessages((current) => [...result.messages.filter((older) => !current.some((item) => item.id === older.id)), ...current]);
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        if (list) list.scrollTop = previousTop + list.scrollHeight - previousHeight;
+      }));
     } finally { setLoadingOlder(false); }
+  }
+
+  function toggleSearch() {
+    setSearchOpen((current) => {
+      const next = !current;
+      if (!next) {
+        setSearchQuery("");
+        setSearchResults([]);
+        requestAnimationFrame(() => scrollToLatest("auto"));
+      }
+      return next;
+    });
   }
 
   async function logout() {
@@ -630,18 +778,56 @@ function Chat({ bootstrap: initial, onUnauthenticated }: { bootstrap: Bootstrap;
       <header className="chat-header">
         <div className="group-avatar" aria-hidden="true"><span>↔</span></div>
         <div className="group-copy"><h1>{data.group.name}</h1><span><i className={data.group.smsEnabled ? "online" : "paused"} /> {data.members.length} members · SMS {data.group.smsEnabled ? "connected" : "paused"}</span></div>
+        <button className={`header-button ${searchOpen ? "active" : ""}`} type="button" onClick={toggleSearch} aria-label={searchOpen ? "Close message search" : "Search messages"} aria-pressed={searchOpen} title="Search messages"><span aria-hidden="true">⌕</span></button>
         <button className="header-button members-button" type="button" onClick={() => setPanel("members")} aria-label="View members">♟<span>Members</span></button>
         <button className="header-button" type="button" onClick={() => setPanel("settings")} aria-label="Open settings">•••</button>
       </header>
-      {error && <ErrorBanner message={error} onDismiss={() => setError("")} />}
-      <div className="message-list" ref={listRef}>
-        <div className="history-start"><button type="button" onClick={() => void loadOlder()} disabled={loadingOlder}>{loadingOlder ? "Loading…" : "Load older messages"}</button><p>Messages are stored privately on your server.</p></div>
-        {messages.map((message, index) => {
-          const day = dayLabel(message.createdAt);
-          const showDay = day !== lastDay;
-          lastDay = day;
-          return <div key={message.id}>{showDay && <div className="day-divider"><span>{day}</span></div>}<MessageItem message={message} previous={messages[index - 1]} currentMember={data.currentMember} onReply={(item) => { setReplyingTo(item); textareaRef.current?.focus(); }} onReact={(item, emoji, remove) => void react(item, emoji, remove)} onDelete={(item) => void deleteMessage(item)} /></div>;
-        })}
+      <div className="chat-tools">
+        {error && <ErrorBanner message={error} onDismiss={() => setError("")} />}
+        {searchOpen && (
+          <div className="search-bar" role="search">
+            <span aria-hidden="true">⌕</span>
+            <input ref={searchInputRef} type="search" value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="Search messages or people" aria-label="Search messages or people" maxLength={100} />
+            {searching && <span className="search-spinner" role="status" aria-label="Searching" />}
+            <button type="button" onClick={toggleSearch} aria-label="Close search">×</button>
+          </div>
+        )}
+      </div>
+      <div className="message-pane">
+        <div className="message-list" ref={listRef} onScroll={handleMessageScroll}>
+          {searchOpen ? (
+            <div className="search-status" role="status">
+              {normalizedSearch.length < 2 ? "Enter at least two characters" : searching ? "Searching…" : `${searchResults.length} ${searchResults.length === 1 ? "result" : "results"}`}
+            </div>
+          ) : (
+            <div className="history-start"><button type="button" onClick={() => void loadOlder()} disabled={loadingOlder}>{loadingOlder ? "Loading…" : "Load older messages"}</button><p>Messages are stored privately on your server.</p></div>
+          )}
+          {searchActive && !searching && searchResults.length === 0 && <div className="empty-search"><strong>No messages found</strong><span>Try another word or sender name.</span></div>}
+          {visibleMessages.map((message, index) => {
+            const day = dayLabel(message.createdAt);
+            const showDay = day !== lastDay;
+            lastDay = day;
+            return (
+              <div key={message.id}>
+                {showDay && <div className="day-divider"><span>{day}</span></div>}
+                <MessageItem
+                  message={message}
+                  previous={visibleMessages[index - 1]}
+                  currentMember={data.currentMember}
+                  onReply={(item) => { setReplyingTo(item); setSearchOpen(false); setSearchQuery(""); requestAnimationFrame(() => textareaRef.current?.focus()); }}
+                  onReact={(item, emoji, remove) => void react(item, emoji, remove)}
+                  onDelete={(item) => void deleteMessage(item)}
+                  onCopy={(item) => void copyMessage(item)}
+                />
+              </div>
+            );
+          })}
+        </div>
+        {!searchActive && !atBottom && (
+          <button className="jump-latest" type="button" onClick={() => scrollToLatest()}>
+            <span aria-hidden="true">↓</span>{newMessageCount > 0 ? `${newMessageCount} new` : "Latest"}
+          </button>
+        )}
       </div>
       <footer className="composer-area">
         {replyingTo && <div className="composer-reply"><div><strong>Replying to {replyingTo.senderName}</strong><span>{truncate(replyingTo.body || "Photo", 120)}</span></div><button type="button" onClick={() => setReplyingTo(undefined)}>×</button></div>}
@@ -653,11 +839,18 @@ function Chat({ bootstrap: initial, onUnauthenticated }: { bootstrap: Bootstrap;
           </div>
         )}
         <div className="format-bar" aria-label="Message formatting">
-          <button type="button" onClick={() => wrapSelection("**")} title="Bold"><b>B</b></button>
-          <button type="button" onClick={() => wrapSelection("_")} title="Italic"><i>I</i></button>
-          <button type="button" onClick={() => wrapSelection("`")} title="Inline code"><span>&lt;/&gt;</span></button>
-          <button type="button" onClick={() => setComposer((current) => `${current}${current && !current.endsWith("\n") ? "\n" : ""}- `)} title="List">≡</button>
-          <button type="button" onClick={() => setComposer((current) => `${current}👍`)} title="Emoji">☺</button>
+          <button type="button" onClick={() => wrapSelection("**")} title="Bold" aria-label="Bold"><b>B</b></button>
+          <button type="button" onClick={() => wrapSelection("_")} title="Italic" aria-label="Italic"><i>I</i></button>
+          <button type="button" onClick={() => wrapSelection("`")} title="Inline code" aria-label="Inline code"><span>&lt;/&gt;</span></button>
+          <button type="button" onClick={() => setComposer((current) => `${current}${current && !current.endsWith("\n") ? "\n" : ""}- `)} title="Bulleted list" aria-label="Bulleted list">≡</button>
+          <div className="emoji-picker">
+            <button type="button" className={emojiOpen ? "active" : ""} onClick={() => setEmojiOpen((current) => !current)} title="Emoji" aria-label="Choose an emoji" aria-expanded={emojiOpen}>☺</button>
+            {emojiOpen && (
+              <div className="emoji-grid" role="dialog" aria-label="Choose an emoji">
+                {COMMON_EMOJIS.map((emoji) => <button type="button" key={emoji} onClick={() => addEmoji(emoji)} aria-label={`Insert ${emoji}`}>{emoji}</button>)}
+              </div>
+            )}
+          </div>
           <span className="format-spacer" />
           <input ref={photoInputRef} className="visually-hidden" type="file" accept={data.imageUploads.acceptedTypes.join(",")} onChange={choosePhoto} />
           <button type="button" className="attachment-button" disabled={!data.imageUploads.enabled || sending} onClick={() => photoInputRef.current?.click()} title="Attach a photo" aria-label="Attach a photo">＋</button>
@@ -666,8 +859,9 @@ function Chat({ bootstrap: initial, onUnauthenticated }: { bootstrap: Bootstrap;
           <textarea ref={textareaRef} value={composer} onChange={(event) => setComposer(event.target.value)} onKeyDown={composerKeyDown} placeholder={`Message ${data.group.name}`} rows={1} maxLength={4000} aria-label="Message" />
           <button className="send-button" type="button" onClick={() => void sendMessage()} disabled={(!composer.trim() && !photo) || sending} aria-label="Send message">➤</button>
         </div>
-        <span className="composer-hint">Enter to send · Shift + Enter for a new line</span>
+        <span className="composer-hint">{composer ? "Draft saved on this device" : "Enter to send · Shift + Enter for a new line"}</span>
       </footer>
+      {notice && <div className="toast" role="status">{notice}</div>}
       {panel && (
         <div className="panel-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setPanel(null); }}>
           <aside className="side-panel" aria-label={`${panel} panel`}>

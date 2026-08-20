@@ -386,6 +386,23 @@ export class SqliteStore {
     return this.mapMessages(rows);
   }
 
+  searchMessages(groupId: string, query: string, limit: number): ChatMessage[] {
+    const escaped = query.replaceAll("\\", "\\\\").replaceAll("%", "\\%").replaceAll("_", "\\_");
+    const pattern = `%${escaped}%`;
+    const rows = this.messageSelect(`
+      WHERE msg.group_id = ?
+        AND msg.deleted_at IS NULL
+        AND (
+          msg.body LIKE ? ESCAPE '\\' COLLATE NOCASE
+          OR COALESCE(sender.display_name, 'System') LIKE ? ESCAPE '\\' COLLATE NOCASE
+        )
+      ORDER BY msg.created_at DESC
+      LIMIT ?
+    `).all(groupId, pattern, pattern, limit) as MessageRow[];
+    rows.reverse();
+    return this.mapMessages(rows);
+  }
+
   addReaction(messageId: string, memberId: string, emoji: string): Reaction {
     const message = this.db.prepare("SELECT id FROM messages WHERE id = ? AND deleted_at IS NULL").get(messageId);
     if (!message) throw new Error("Message not found");
