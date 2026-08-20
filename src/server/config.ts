@@ -12,6 +12,7 @@ const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   HOST: z.string().default("0.0.0.0"),
   PORT: z.coerce.number().int().min(1).max(65535).default(3000),
+  TRUST_PROXY: z.string().trim().default("false"),
   APP_BASE_URL: z.string().url().default("http://localhost:3000"),
   SESSION_SECRET: z.string().min(16).default("development-only-change-this-secret"),
   DATABASE_PATH: z.string().default("/data/chat.db"),
@@ -42,6 +43,7 @@ export type AppConfig = {
   nodeEnv: "development" | "test" | "production";
   host: string;
   port: number;
+  trustProxy: boolean | string;
   appBaseUrl: string;
   sessionSecret: string;
   databasePath: string;
@@ -75,6 +77,7 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): AppConfig {
     nodeEnv: env.NODE_ENV,
     host: env.HOST,
     port: env.PORT,
+    trustProxy: env.TRUST_PROXY === "true" ? true : env.TRUST_PROXY === "false" ? false : env.TRUST_PROXY,
     appBaseUrl: env.APP_BASE_URL.replace(/\/$/, ""),
     sessionSecret: env.SESSION_SECRET,
     databasePath: env.DATABASE_PATH === ":memory:" ? ":memory:" : resolve(env.DATABASE_PATH),
@@ -119,6 +122,9 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): AppConfig {
       ["VOIPMS_WEBHOOK_SECRET", config.voipmsWebhookSecret]
     ].filter(([, value]) => !value).map(([name]) => name);
     if (missing.length > 0) throw new Error(`SMS_ENABLED requires: ${missing.join(", ")}`);
+    if (!config.voipmsSendSmsParamsVerified) {
+      throw new Error("SMS_ENABLED requires VOIPMS_SENDSMS_PARAMS_VERIFIED=true");
+    }
   }
 
   return config;

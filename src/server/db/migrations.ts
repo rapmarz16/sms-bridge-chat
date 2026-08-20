@@ -134,6 +134,15 @@ const migrations: Migration[] = [
       );
       CREATE INDEX security_events_created_idx ON security_events(created_at DESC);
     `
+  },
+  {
+    version: 2,
+    name: "one_group_per_sms_did",
+    sql: `
+      CREATE UNIQUE INDEX groups_sms_did_unique
+        ON groups(sms_did)
+        WHERE sms_did IS NOT NULL;
+    `
   }
 ];
 

@@ -2,7 +2,7 @@
 
 A private, self-hosted group chat where installing an app is optional. The application database is the canonical conversation; the PWA and ordinary SMS are two clients of that same conversation.
 
-> Current build status: the local chat and bidirectional text-bridge milestones are implemented and covered by automated tests. Provider reliability and limit/restart tests are the next gate before the bridge should be enabled.
+> Current build status: the complete text MVP is implemented and covered by 25 automated tests. The remaining production gate is owner-supplied VoIP.ms configuration plus real Canadian/U.S. phone validation. Images/MMS remain deliberately deferred.
 
 ## What is implemented
 
@@ -111,6 +111,81 @@ The handler checks the secret and destination DID, normalizes the sender, applie
 
 `src/server/sms/voipms.ts` is the only code that knows the VoIP.ms outbound field names. The publicly documented common authentication fields and `sendSMS` method are implemented, but the owner must compare `did`, `dst`, and `message` against the current method reference inside Main Menu → SOAP & REST/JSON API. Set `VOIPMS_SENDSMS_PARAMS_VERIFIED=true` only after that comparison.
 
+## Owner's VoIP.ms setup checklist
+
+Use the current [VoIP.ms SMS/MMS instructions](https://wiki.voip.ms/article/SMS-MMS) and [API overview](https://wiki.voip.ms/article/API_Overview) as the source of truth while completing these steps:
+
+1. Confirm the existing DID shows SMS/MMS support.
+2. Enable Message Service/SMS/MMS on that DID.
+3. Open Main Menu → SOAP and REST/JSON API and enable API access.
+4. Create a dedicated API password. Do not reuse or paste the portal password.
+5. Add the Unraid/public egress IP or approved DNS/CIDR to the API allow-list. The `getIP` method can show the address VoIP.ms sees.
+6. Select E.164 dialing mode for SMS/API and store the DID as `+1...` in `.env`.
+7. Create a long random `VOIPMS_WEBHOOK_SECRET` and configure this callback, retaining every substitution variable:
+
+   ```text
+   https://chat.example.com/api/webhooks/voipms/SECRET?to={TO}&from={FROM}&message={MESSAGE}&id={ID}&timestamp={TIMESTAMP}&media={MEDIA}
+   ```
+
+8. Ensure the proxy/provider safely URL-encodes substituted values.
+9. Enable URL Callback Retry. The application returns exact lowercase `ok` after durable persistence, so duplicate retries are safe.
+10. Send a real inbound SMS and confirm one canonical PWA message appears.
+11. Send a PWA message and confirm each intended SMS/BOTH member receives one sender-prefixed SMS.
+12. Complete any messaging/A2P verification VoIP.ms requires for API traffic and confirm that this private conversational bridge is acceptable for the account.
+13. VoIP.ms documents a default API-originated limit of 100 messages/day. Request a higher limit if appropriate, then change `SMS_DAILY_LIMIT` to the approved value.
+14. Compare the current portal-only `sendSMS` fields with the isolated adapter, then set `VOIPMS_SENDSMS_PARAMS_VERIFIED=true`.
+15. Only after all prior checks, set `SMS_ENABLED=true` and restart the container.
+
+Do not send credentials through chat or commit them. Put them directly in the deployment's protected `.env`/secret configuration.
+
+## Reverse proxy and query-string privacy
+
+VoIP.ms's standard callback puts private message text in a GET query. The application disables automatic request logging and only records route templates, never full URLs. The reverse proxy must follow the same rule. For Nginx, use a dedicated callback location with access logging disabled, while retaining normal logs elsewhere:
+
+```nginx
+location ^~ /api/webhooks/voipms/ {
+    access_log off;
+    proxy_pass http://127.0.0.1:3000;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+}
+
+location /socket.io/ {
+    proxy_pass http://127.0.0.1:3000;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host $host;
+}
+
+location / {
+    proxy_pass http://127.0.0.1:3000;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+}
+```
+
+In Nginx Proxy Manager, create a custom location for `/api/webhooks/voipms/` and add `access_log off;` to that location rather than adding a second nested `location` block to a generated server. Check upstream CDN/tunnel logging too. The secret itself is part of the path, so this route should not appear in access logs at all.
+
+Keep `TRUST_PROXY=false` if the app port is directly reachable. When only a reverse proxy can reach it, set `TRUST_PROXY` to that proxy's exact IP/CIDR so forwarded client addresses can be used safely for rate limiting. Avoid a blanket `true` unless the entire network path is controlled.
+
+## Required real-phone validation
+
+Before calling the deployment production-ready, test this matrix with actual phones:
+
+- Canadian PWA → Canadian SMS
+- Canadian SMS → PWA and another SMS member, with no sender echo
+- U.S. PWA/SMS member in both directions
+- One message containing emoji and one containing a full HTTPS link
+- A deliberate duplicate callback using the same provider ID
+- Provider credentials temporarily disabled while a PWA message is sent, followed by retry recovery
+- Bridge kill switch while ordinary PWA chat continues
+- Usage warnings at configured 80%, 95%, and 100% thresholds
+
+Do not enable images/MMS until this text matrix passes.
+
 ## Safety defaults
 
 - `SMS_ENABLED=false` prevents accidental provider traffic.
@@ -132,6 +207,20 @@ The handler checks the secret and destination DID, normalizes the sender, applie
 | `npm run create-admin:dev -- --name ... --phone ...` | Bootstrap an administrator locally |
 | `npm run create-admin -- --name ... --phone ...` | Bootstrap an administrator after production build |
 
+The GitHub CI workflow repeats tests, the production build, and a real `docker build`. A separate manual/tag workflow publishes an `linux/amd64` image to `ghcr.io/<owner>/sms-bridge-chat` without embedding `.env` values.
+
+## Automated coverage
+
+`npm test` currently runs 25 tests covering:
+
+- OTP sessions, CSRF, member administration, persistence, and authenticated Socket.IO delivery
+- Known/unknown inbound numbers, wrong DID, bad secret, duplicate provider IDs, and bridge shutdown
+- PWA fan-out, SMS fan-out, and the no-sender-echo rule
+- Provider outage, permanent errors, bounded transient retries, restart recovery, and uncertain in-flight safety
+- Daily-limit enforcement and warning thresholds while canonical chat continues
+- Markdown-to-SMS degradation, full-link preservation, reply quoting, and reaction suppression
+- Isolated VoIP.ms request mapping and the mandatory owner-verification gate
+
 ## Environment
 
 The complete, comment-documented list is in `.env.example`. Secrets are server-only and must never be embedded in frontend variables or committed. `SESSION_SECRET` must be at least 32 characters in production. `DEV_OTP_BYPASS_CODE` is rejected in production.
@@ -141,8 +230,8 @@ The complete, comment-documented list is in `.env.example`. Secrets are server-o
 - [x] Milestone 1 — canonical local chat, authentication, administration, PWA, history, realtime
 - [x] Milestone 2 — inbound callback, phone mapping, sender allow-list, idempotency
 - [x] Milestone 3 — provider adapter, durable per-recipient fan-out queue, sender prefixes
-- [ ] Milestone 4 — retries, limits, outage handling, monitoring, redacted logs
-- [ ] Milestone 5 — safe Markdown, replies, reactions, link-preserving SMS rendering
+- [x] Milestone 4 — retries, limits, outage handling, monitoring, redacted logs
+- [x] Milestone 5 — safe Markdown, replies, reactions, link-preserving SMS rendering
 - [ ] Milestone 6 — image uploads/MMS, intentionally waiting for real-phone text validation
 
-Full VoIP.ms configuration, callback, reverse-proxy logging, production verification, and test instructions are documented below as those bridge milestones are finalized.
+See `docs/IMPLEMENTATION_STATUS.md` for the remaining production assumptions and intentionally deferred work.

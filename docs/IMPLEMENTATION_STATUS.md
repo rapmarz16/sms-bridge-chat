@@ -22,6 +22,16 @@
 - Provider abstraction and isolated VoIP.ms request mapping
 - Automated known/unknown sender, duplicate callback, wrong DID, kill-switch, and fan-out tests
 
+### Milestones 4–5 — reliability and rich text
+
+- Persistent queue claims, bounded exponential retries, and permanent/transient error handling
+- Provider-call accounting and enforced daily cutoff with 80/95/100 percent warnings
+- Pending delivery recovery after restart and at-most-once handling for uncertain in-flight jobs
+- Admin usage/failure monitoring and deliberate retry control
+- Safe Markdown rendering in the PWA and deterministic plain-text SMS degradation
+- Reply context capped to a short quote and reactions retained as app-only events
+- Authenticated Socket.IO integration test and isolated VoIP.ms form-mapping tests
+
 ## Unresolved production assumptions
 
 1. The full `sendSMS` method parameter reference is only available in the authenticated VoIP.ms account portal. The adapter uses the isolated `did`, `dst`, and `message` mapping and refuses to send until the owner sets `VOIPMS_SENDSMS_PARAMS_VERIFIED=true` after comparing it with the current portal reference.

@@ -1,5 +1,6 @@
 import { rmSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
+import { io } from "socket.io-client";
 import { SqliteStore } from "../src/server/db/store.js";
 import { createTestContext, login, type TestContext } from "./helpers.js";
 
@@ -119,5 +120,34 @@ describe("milestone 1 local chat", () => {
     reopened.close();
     rmSync(context.directory, { recursive: true, force: true });
     context = undefined;
+  });
+
+  it("pushes a committed message to an authenticated Socket.IO client", async () => {
+    context = await createTestContext();
+    const auth = await login(context);
+    const address = await context.built.app.listen({ host: "127.0.0.1", port: 0 });
+    const socket = io(address, {
+      path: "/socket.io",
+      transports: ["websocket"],
+      extraHeaders: { cookie: auth.cookie }
+    });
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("socket connection timed out")), 3000);
+      socket.once("connect", () => { clearTimeout(timeout); resolve(); });
+      socket.once("connect_error", reject);
+    });
+    const pushed = new Promise<{ body: string }>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("message event timed out")), 3000);
+      socket.once("message:new", (message) => { clearTimeout(timeout); resolve(message); });
+    });
+    const response = await context.built.app.inject({
+      method: "POST",
+      url: "/api/messages",
+      headers: { cookie: auth.cookie, "x-csrf-token": auth.csrf },
+      payload: { body: "Realtime delivery" }
+    });
+    expect(response.statusCode).toBe(201);
+    await expect(pushed).resolves.toMatchObject({ body: "Realtime delivery" });
+    socket.close();
   });
 });

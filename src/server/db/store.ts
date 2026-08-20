@@ -97,7 +97,7 @@ export class SqliteStore {
         "INSERT INTO groups(id, name, sms_did, sms_enabled, created_at) VALUES (?, ?, ?, 1, ?)"
       ).run(id, name, smsDid ?? null, now);
       row = this.db.prepare("SELECT * FROM groups WHERE id = ?").get(id) as GroupRow;
-    } else if (!row.sms_did && smsDid) {
+    } else if (smsDid && row.sms_did !== smsDid) {
       this.db.prepare("UPDATE groups SET sms_did = ? WHERE id = ?").run(smsDid, row.id);
       row = { ...row, sms_did: smsDid };
     }
@@ -165,6 +165,9 @@ export class SqliteStore {
         this.db.prepare("DELETE FROM sessions WHERE member_id = ?").run(id);
       } else if (input.active === true) {
         this.db.prepare("UPDATE group_memberships SET active = 1 WHERE member_id = ?").run(id);
+      }
+      if (input.phoneNumberE164 && input.phoneNumberE164 !== current.phone_number_e164) {
+        this.db.prepare("DELETE FROM sessions WHERE member_id = ?").run(id);
       }
     })();
     return this.getMemberById(id);
@@ -446,6 +449,14 @@ export class SqliteStore {
     return row ? this.mapDelivery(row) : undefined;
   }
 
+  listDeliveriesForMessage(messageId: string): SmsDelivery[] {
+    const rows = this.db.prepare(`
+      SELECT d.*, m.display_name AS member_name FROM sms_deliveries d
+      JOIN members m ON m.id = d.member_id WHERE d.message_id = ? ORDER BY d.created_at, d.member_id
+    `).all(messageId) as DeliveryRow[];
+    return rows.map((row) => this.mapDelivery(row));
+  }
+
   markDeliveryAccepted(id: string, providerMessageId?: string): void {
     this.db.prepare(`
       UPDATE sms_deliveries SET status = 'ACCEPTED', provider_message_id = ?, last_error = NULL,
@@ -460,7 +471,7 @@ export class SqliteStore {
     `).run(error, availableAt, Date.now(), id);
   }
 
-  markDeliveryFailed(id: string, error: string, status: "FAILED" | "SKIPPED_LIMIT" = "FAILED"): void {
+  markDeliveryFailed(id: string, error: string, status: "FAILED" | "SKIPPED" | "SKIPPED_LIMIT" = "FAILED"): void {
     this.db.prepare(`
       UPDATE sms_deliveries SET status = ?, last_error = ?, locked_at = NULL, updated_at = ? WHERE id = ?
     `).run(status, error, Date.now(), id);

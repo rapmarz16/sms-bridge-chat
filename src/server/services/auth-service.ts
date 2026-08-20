@@ -34,6 +34,9 @@ export class AuthService {
     }
     const recent = this.store.countRecentOtpChallenges(member.id, Date.now() - 15 * 60_000);
     if (recent >= 3) throw new AuthError("Too many codes requested. Try again in 15 minutes.", 429, "OTP_RATE_LIMIT");
+    if (!this.config.devOtpBypassCode && !this.config.smsEnabled) {
+      throw new AuthError("SMS login is not configured yet", 503, "SMS_DISABLED");
+    }
 
     const code = this.config.devOtpBypassCode ?? randomOtp();
     if (!/^\d{6}$/.test(code)) throw new Error("DEV_OTP_BYPASS_CODE must be exactly six digits");
@@ -46,7 +49,6 @@ export class AuthService {
     });
 
     if (!this.config.devOtpBypassCode) {
-      if (!this.config.smsEnabled) throw new AuthError("SMS login is not configured yet", 503, "SMS_DISABLED");
       const dayKey = localDayKey(Date.now(), this.config.timezone);
       const reservation = this.store.reserveProviderAttempt({
         referenceType: "OTP",

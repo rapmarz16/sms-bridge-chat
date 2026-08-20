@@ -95,12 +95,16 @@ export class ChatService {
 
   addReaction(member: Member, messageId: string, emoji: string): Reaction {
     if (!["👍", "❤️", "😂", "😮"].includes(emoji)) throw new Error("Unsupported reaction");
+    const message = this.store.getMessage(messageId);
+    if (!message || !this.store.memberBelongsToGroup(member.id, message.groupId)) throw new Error("Message not found");
     const reaction = this.store.addReaction(messageId, member.id, emoji);
     this.events.emit("reaction", reaction);
     return reaction;
   }
 
   removeReaction(member: Member, messageId: string, emoji: string): boolean {
+    const message = this.store.getMessage(messageId);
+    if (!message || !this.store.memberBelongsToGroup(member.id, message.groupId)) throw new Error("Message not found");
     const removed = this.store.removeReaction(messageId, member.id, emoji);
     if (removed) this.events.emit("reaction:removed", { messageId, memberId: member.id, emoji });
     return removed;

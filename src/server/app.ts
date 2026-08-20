@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { resolve } from "node:path";
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, { LogController, type FastifyInstance } from "fastify";
 import cookie from "@fastify/cookie";
 import helmet from "@fastify/helmet";
 import multipart from "@fastify/multipart";
@@ -46,6 +46,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<BuiltApp>
   const ownsStore = !options.store;
   const store = options.store ?? new SqliteStore(config.databasePath);
   store.ensureDefaultGroup(config.groupName, config.voipmsDid);
+  store.pruneExpiredAuthData();
   mkdirSync(config.uploadsPath, { recursive: true });
   const provider = options.provider ?? (config.smsEnabled ? new VoipMsProvider(config) : new DisabledSmsProvider());
   const events = new ChatEventBus();
@@ -62,9 +63,9 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<BuiltApp>
         censor: "[REDACTED]"
       }
     },
-    disableRequestLogging: true,
+    logController: new LogController({ disableRequestLogging: true }),
     bodyLimit: 64 * 1024,
-    trustProxy: true
+    trustProxy: config.trustProxy
   });
 
   await app.register(cookie);

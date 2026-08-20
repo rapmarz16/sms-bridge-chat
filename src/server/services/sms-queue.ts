@@ -66,7 +66,7 @@ export class SmsQueueWorker {
     if (!delivery) return;
     const group = this.store.getDefaultGroup();
     if (!this.config.smsEnabled || !group.smsEnabled) {
-      this.store.markDeliveryFailed(id, "SMS bridge disabled", "FAILED");
+      this.store.markDeliveryFailed(id, "SMS bridge disabled", "SKIPPED");
       return;
     }
     const message = this.store.getMessage(delivery.messageId);
