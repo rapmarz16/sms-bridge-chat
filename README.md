@@ -2,7 +2,7 @@
 
 A private, self-hosted group chat where installing an app is optional. The application database is the canonical conversation; the PWA and ordinary SMS are two clients of that same conversation.
 
-> Current build status: the local-chat milestone is implemented. Bidirectional VoIP.ms bridging, queue reliability, usage enforcement, and their automated tests live in the same repository and are completed in later milestones before the bridge should be enabled.
+> Current build status: the local chat and bidirectional text-bridge milestones are implemented and covered by automated tests. Provider reliability and limit/restart tests are the next gate before the bridge should be enabled.
 
 ## What is implemented
 
@@ -93,6 +93,24 @@ node dist/server/cli/create-admin.js --name "Name" --phone "+14165551234"
 
 It creates the first member, adds the member to the default group, grants administrator access, and uses `BOTH` delivery mode. Running it again for the same normalized phone number safely restores that member as an active administrator.
 
+## VoIP.ms callback route
+
+The inbound route is:
+
+```text
+GET /api/webhooks/voipms/:secret
+```
+
+Configure the DID callback with URL-encoded substitutions:
+
+```text
+https://chat.example.com/api/webhooks/voipms/LONG_RANDOM_SECRET?to={TO}&from={FROM}&message={MESSAGE}&id={ID}&timestamp={TIMESTAMP}&media={MEDIA}
+```
+
+The handler checks the secret and destination DID, normalizes the sender, applies the active-member allow-list, and uses the VoIP.ms ID as an idempotency key. It returns the exact text `ok` only after the canonical message and all delivery jobs have committed. Slow outbound calls never run in the callback request.
+
+`src/server/sms/voipms.ts` is the only code that knows the VoIP.ms outbound field names. The publicly documented common authentication fields and `sendSMS` method are implemented, but the owner must compare `did`, `dst`, and `message` against the current method reference inside Main Menu → SOAP & REST/JSON API. Set `VOIPMS_SENDSMS_PARAMS_VERIFIED=true` only after that comparison.
+
 ## Safety defaults
 
 - `SMS_ENABLED=false` prevents accidental provider traffic.
@@ -123,8 +141,8 @@ The complete, comment-documented list is in `.env.example`. Secrets are server-o
 - [x] Milestone 1 — canonical local chat, authentication, administration, PWA, history, realtime
 - [x] Milestone 2 — inbound callback, phone mapping, sender allow-list, idempotency
 - [x] Milestone 3 — provider adapter, durable per-recipient fan-out queue, sender prefixes
-- [x] Milestone 4 — retries, limits, outage handling, monitoring, redacted logs
-- [x] Milestone 5 — safe Markdown, replies, reactions, link-preserving SMS rendering
+- [ ] Milestone 4 — retries, limits, outage handling, monitoring, redacted logs
+- [ ] Milestone 5 — safe Markdown, replies, reactions, link-preserving SMS rendering
 - [ ] Milestone 6 — image uploads/MMS, intentionally waiting for real-phone text validation
 
 Full VoIP.ms configuration, callback, reverse-proxy logging, production verification, and test instructions are documented below as those bridge milestones are finalized.

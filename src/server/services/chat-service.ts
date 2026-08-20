@@ -12,7 +12,8 @@ export class ChatService {
   constructor(
     private readonly store: SqliteStore,
     private readonly config: AppConfig,
-    private readonly events: ChatEventBus
+    private readonly events: ChatEventBus,
+    private readonly smsProviderName: string
   ) {}
 
   setQueueWakeHandler(handler: () => void): void {
@@ -31,6 +32,7 @@ export class ChatService {
       source: "APP",
       body,
       replyToMessageId: input.replyToMessageId,
+      smsProviderName: this.smsProviderName,
       fanoutEnabled: this.config.smsEnabled,
       excludeSenderFromSms: false
     });
@@ -48,6 +50,10 @@ export class ChatService {
     media?: string;
   }): { message?: ChatMessage; duplicate: boolean; ignored: boolean } {
     const group = this.store.getDefaultGroup();
+    if (!this.config.smsEnabled || !group.smsEnabled) {
+      this.store.recordSecurityEvent("SMS_BRIDGE_DISABLED");
+      return { duplicate: false, ignored: true };
+    }
     if (!group.smsDid || !samePhone(input.to, group.smsDid, this.config.defaultPhoneRegion)) {
       this.store.recordSecurityEvent("WEBHOOK_WRONG_DID");
       return { duplicate: false, ignored: true };
@@ -76,6 +82,7 @@ export class ChatService {
       body,
       externalProvider: "voipms",
       externalProviderId: input.providerMessageId,
+      smsProviderName: this.smsProviderName,
       fanoutEnabled: this.config.smsEnabled,
       excludeSenderFromSms: true
     });

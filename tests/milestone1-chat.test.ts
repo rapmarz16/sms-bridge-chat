@@ -109,6 +109,7 @@ describe("milestone 1 local chat", () => {
       senderMemberId: member.id,
       source: "APP",
       body: "Persist me",
+      smsProviderName: "fake",
       fanoutEnabled: false,
       excludeSenderFromSms: false
     }).message;

@@ -204,6 +204,7 @@ export class SqliteStore {
     replyToMessageId?: string;
     externalProvider?: string;
     externalProviderId?: string;
+    smsProviderName: string;
     fanoutEnabled: boolean;
     excludeSenderFromSms: boolean;
   }): { message: ChatMessage; duplicate: boolean; deliveryCount: number } {
@@ -250,13 +251,13 @@ export class SqliteStore {
         INSERT INTO sms_deliveries(
           id, message_id, member_id, phone_number, provider, status, attempts,
           available_at, created_at, updated_at, last_error
-        ) VALUES (?, ?, ?, ?, 'voipms', ?, 0, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
       `);
       for (const recipient of recipients) {
         if (input.excludeSenderFromSms && recipient.id === input.senderMemberId) continue;
         insertDelivery.run(
           randomUUID(), messageId, recipient.id, recipient.phone_number_e164,
-          status, now, now, now, status === "SKIPPED" ? "SMS bridge disabled" : null
+          input.smsProviderName, status, now, now, now, status === "SKIPPED" ? "SMS bridge disabled" : null
         );
         deliveryCount += 1;
       }

@@ -28,7 +28,7 @@ export function registerChatRoutes(
     const used = store.getSmsUsage(localDayKey(Date.now(), config.timezone));
     return {
       currentMember: member,
-      group: { ...group, smsDid: undefined },
+      group: { ...group, smsDid: undefined, smsEnabled: group.smsEnabled && config.smsEnabled },
       members: store.listMembers(group.id).filter((item) => item.active).map(publicMember),
       messages: store.listMessages(group.id, { limit: 50 }),
       smsUsage: {

@@ -50,7 +50,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<BuiltApp>
   const provider = options.provider ?? (config.smsEnabled ? new VoipMsProvider(config) : new DisabledSmsProvider());
   const events = new ChatEventBus();
   const auth = new AuthService(store, config, provider);
-  const chat = new ChatService(store, config, events);
+  const chat = new ChatService(store, config, events, provider.name);
   const worker = new SmsQueueWorker(store, config, provider);
   chat.setQueueWakeHandler(worker.wake);
 
