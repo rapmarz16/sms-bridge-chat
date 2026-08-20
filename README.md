@@ -370,7 +370,7 @@ Do not enable carrier MMS relay until this text matrix passes. Private in-app ph
 | `npm run configure-android-gateway` | Check the phone and register signed callbacks after production build |
 | `npm run generate-vapid-keys` | Generate the one-time Web Push public/private key pair |
 
-The GitHub CI workflow repeats tests, the production build, and a real `docker build`. A separate manual/tag workflow publishes an `linux/amd64` image to `ghcr.io/<owner>/sms-bridge-chat` without embedding `.env` values.
+The GitHub CI workflow repeats tests, the production build, and a real `docker build`. The package workflow publishes `ghcr.io/<owner>/sms-bridge-chat:latest` on every `main` release; manual runs and version tags are also supported. No `.env` values are embedded in the image.
 
 ## Automated coverage
 
