@@ -1,0 +1,163 @@
+import { existsSync, mkdirSync } from "node:fs";
+import { resolve } from "node:path";
+import Fastify, { type FastifyInstance } from "fastify";
+import cookie from "@fastify/cookie";
+import helmet from "@fastify/helmet";
+import multipart from "@fastify/multipart";
+import rateLimit from "@fastify/rate-limit";
+import fastifyStatic from "@fastify/static";
+import { Server as SocketServer } from "socket.io";
+import { ZodError } from "zod";
+import type { AppConfig } from "./config.js";
+import { loadConfig } from "./config.js";
+import { SqliteStore } from "./db/store.js";
+import { ChatEventBus } from "./events.js";
+import { registerAdminRoutes } from "./http/routes-admin.js";
+import { registerAuthRoutes } from "./http/routes-auth.js";
+import { registerChatRoutes } from "./http/routes-chat.js";
+import { registerWebhookRoutes } from "./http/routes-webhook.js";
+import { HttpError, SESSION_COOKIE } from "./http/guards.js";
+import { cleanErrorMessage } from "./security.js";
+import { AuthError, AuthService } from "./services/auth-service.js";
+import { ChatService } from "./services/chat-service.js";
+import { SmsQueueWorker } from "./services/sms-queue.js";
+import { DisabledSmsProvider, type SmsProvider } from "./sms/provider.js";
+import { VoipMsProvider } from "./sms/voipms.js";
+
+export type BuildAppOptions = {
+  config?: AppConfig;
+  store?: SqliteStore;
+  provider?: SmsProvider;
+  startWorker?: boolean;
+  serveClient?: boolean;
+};
+
+export type BuiltApp = {
+  app: FastifyInstance;
+  store: SqliteStore;
+  events: ChatEventBus;
+  auth: AuthService;
+  chat: ChatService;
+  worker: SmsQueueWorker;
+};
+
+export async function buildApp(options: BuildAppOptions = {}): Promise<BuiltApp> {
+  const config = options.config ?? loadConfig();
+  const ownsStore = !options.store;
+  const store = options.store ?? new SqliteStore(config.databasePath);
+  store.ensureDefaultGroup(config.groupName, config.voipmsDid);
+  mkdirSync(config.uploadsPath, { recursive: true });
+  const provider = options.provider ?? (config.smsEnabled ? new VoipMsProvider(config) : new DisabledSmsProvider());
+  const events = new ChatEventBus();
+  const auth = new AuthService(store, config, provider);
+  const chat = new ChatService(store, config, events);
+  const worker = new SmsQueueWorker(store, config, provider);
+  chat.setQueueWakeHandler(worker.wake);
+
+  const app = Fastify({
+    logger: config.logLevel === "silent" ? false : {
+      level: config.logLevel,
+      redact: {
+        paths: ["req.headers.authorization", "req.headers.cookie", "res.headers.set-cookie", "password", "otp", "code"],
+        censor: "[REDACTED]"
+      }
+    },
+    disableRequestLogging: true,
+    bodyLimit: 64 * 1024,
+    trustProxy: true
+  });
+
+  await app.register(cookie);
+  await app.register(helmet, {
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        imgSrc: ["'self'", "data:", "blob:"],
+        connectSrc: ["'self'", "ws:", "wss:"],
+        objectSrc: ["'none'"],
+        frameAncestors: ["'none'"]
+      }
+    },
+    crossOriginResourcePolicy: { policy: "same-origin" }
+  });
+  await app.register(rateLimit, { global: true, max: 240, timeWindow: "1 minute" });
+  await app.register(multipart, {
+    limits: { files: 1, fileSize: 5 * 1024 * 1024, fields: 5 }
+  });
+
+  registerAuthRoutes(app, auth, config);
+  registerChatRoutes(app, auth, chat, store, config);
+  registerAdminRoutes(app, auth, store, config, worker);
+  registerWebhookRoutes(app, chat, config);
+
+  app.get("/health", async (_request, reply) => {
+    const database = store.healthCheck() ? "ok" : "error";
+    return reply.code(database === "ok" ? 200 : 503).send({ status: database === "ok" ? "ok" : "error", database });
+  });
+
+  const io = new SocketServer(app.server, {
+    path: "/socket.io",
+    serveClient: false,
+    transports: ["websocket", "polling"]
+  });
+  io.use((socket, next) => {
+    const cookies = app.parseCookie(socket.handshake.headers.cookie ?? "");
+    const member = auth.authenticate(cookies[SESSION_COOKIE]);
+    if (!member) return next(new Error("unauthorized"));
+    socket.data.memberId = member.id;
+    return next();
+  });
+  io.on("connection", (socket) => {
+    socket.join(store.getDefaultGroup().id);
+  });
+  events.on("message", (message) => io.to(message.groupId).emit("message:new", message));
+  events.on("reaction", (reaction) => io.to(store.getDefaultGroup().id).emit("reaction:added", reaction));
+  events.on("reaction:removed", (event) => io.to(store.getDefaultGroup().id).emit("reaction:removed", event));
+
+  const clientRoot = resolve(process.cwd(), "dist/client");
+  if (options.serveClient !== false && existsSync(clientRoot)) {
+    await app.register(fastifyStatic, { root: clientRoot, wildcard: false });
+    app.setNotFoundHandler((request, reply) => {
+      if (request.method === "GET" && !request.url.startsWith("/api/") && !request.url.startsWith("/socket.io")) {
+        return reply.sendFile("index.html");
+      }
+      return reply.code(404).send({ error: "NOT_FOUND", message: "Route not found" });
+    });
+  }
+
+  app.setErrorHandler((error, request, reply) => {
+    let statusCode = 500;
+    let code = "INTERNAL_ERROR";
+    let message = "Something went wrong";
+    if (error instanceof ZodError) {
+      statusCode = 400;
+      code = "VALIDATION_ERROR";
+      message = error.issues[0]?.message ?? "Invalid request";
+    } else if (error instanceof HttpError || error instanceof AuthError) {
+      statusCode = error.statusCode;
+      code = error.code;
+      message = error.message;
+    } else if (error instanceof Error && error.message) {
+      if (error.message.includes("Reply target") || error.message.includes("Message")) {
+        statusCode = 400;
+        code = "INVALID_MESSAGE";
+        message = error.message;
+      }
+    }
+    if (statusCode >= 500) {
+      request.log.error({ error: cleanErrorMessage(error), route: request.routeOptions.url, method: request.method }, "request failed");
+    }
+    return reply.code(statusCode).send({ error: code, message });
+  });
+
+  app.addHook("onClose", async () => {
+    worker.stop();
+    io.close();
+    if (ownsStore) store.close();
+  });
+
+  if (options.startWorker !== false) worker.start();
+  return { app, store, events, auth, chat, worker };
+}

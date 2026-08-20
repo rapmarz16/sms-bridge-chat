@@ -1,0 +1,14 @@
+.git
+.github
+.openai
+.sites-runtime
+.wrangler
+node_modules
+dist
+coverage
+data
+config
+uploads
+.env
+*.db
+npm-debug.log*
